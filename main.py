@@ -256,6 +256,7 @@ class World:
             "description": entity.description,
         }
 
+
 def modify_entity(self, name=None, new_name=None, entity_type=None, description=None):
     if not name:
         raise ValueError("Name of the entity to modify is required.")
@@ -282,12 +283,9 @@ def modify_entity(self, name=None, new_name=None, entity_type=None, description=
     properties = {
         "name": new_name or name,
         "entity_type": entity_type or entity.entity_type,
-        "description": description or entity.description
+        "description": description or entity.description,
     }
-    params = {
-        "old_name": name,
-        "properties": properties
-    }
+    params = {"old_name": name, "properties": properties}
     result = self.db_manager.execute_query(query, **params)
 
     if not result:
