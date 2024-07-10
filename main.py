@@ -26,33 +26,75 @@ class DatabaseManager:
 
 
 class Entity:
-    def __init__(self, name, entity_type, description):
-        self.name = name
-        self.entity_type = entity_type
-        self.description = description
+    def __init__(self, name, entity_type, description=None, **properties):
+        self._properties = {
+            "name": name,
+            "entity_type": entity_type,
+            "description": description,
+        }
+        self._properties.update(properties)
         self.relationships = []
 
+    def __getattr__(self, name):
+        return self._properties.get(name)
+
+    def __setattr__(self, name, value):
+        if name in ["_properties", "relationships"]:
+            super().__setattr__(name, value)
+        else:
+            self._properties[name] = value
+
+    def get_property(self, name):
+        return self._properties.get(name)
+
+    def set_property(self, name, value):
+        self._properties[name] = value
+
+    def delete_property(self, name):
+        if name not in ["name", "entity_type", "description"]:
+            self._properties.pop(name, None)
+
+    def get_all_properties(self):
+        return self._properties.copy()
+
+    def add_relationship(self, rel_type, target, **properties):
+        relationship = Relationship(self, rel_type, target, **properties)
+        self.relationships.append(relationship)
+        return relationship
+
     def __repr__(self):
-        return f"{self.name}: {self.entity_type}"
+        return f"Entity(name={self.name}, type={self.entity_type})"
 
 
 class Relationship:
-    def __init__(self, source, rel_type, target):
-        self.source = source
-        self.rel_type = rel_type
-        self.target = target
+    def __init__(self, source, rel_type, target, **properties):
+        self._properties = {"source": source, "rel_type": rel_type, "target": target}
+        self._properties.update(properties)
+
+    def __getattr__(self, name):
+        return self._properties.get(name)
+
+    def __setattr__(self, name, value):
+        if name == "_properties":
+            super().__setattr__(name, value)
+        else:
+            self._properties[name] = value
+
+    def get_property(self, name):
+        return self._properties.get(name)
+
+    def set_property(self, name, value):
+        self._properties[name] = value
+
+    def delete_property(self, name):
+        if name not in ["source", "rel_type", "target"]:
+            self._properties.pop(name, None)
+
+    def get_all_properties(self):
+        return self._properties.copy()
 
     def __repr__(self):
-        return f"{self.rel_type} -> {self.target.name}"
-
-
-class RelationshipInfo:
-    def __init__(self, rel_type, target):
-        self.rel_type = rel_type
-        self.target = target
-
-    def __repr__(self):
-        return f"{self.rel_type} -> {self.target.name}"
+        return f"{self.source.name} -> {self.rel_type} -> {self.target.name}"
 
 
 class World:
@@ -64,9 +106,10 @@ class World:
         df = pd.read_csv(file_path)
         for _, row in df.iterrows():
             entity = Entity(row["name"], row["type"], row["description"])
-
+            for column in df.columns:
+                if column not in ["name", "type", "description", "relationships"]:
+                    entity.set_property(column, row[column])
             self.entities[entity.name] = entity
-            logging.info(f"Loaded entity: {entity}")
 
         for _, row in df.iterrows():
             entity = self.entities[row["name"]]
@@ -76,25 +119,30 @@ class World:
                     rel_type, rel_target = rel.split(":")
                     target_entity = self.entities.get(rel_target)
                     if target_entity:
-                        relationship = RelationshipInfo(rel_type, target_entity)
-                        entity.relationships.append(relationship)
-                        logging.info(
-                            f"Loaded relationship: {relationship} to entity: {entity}"
-                        )
+                        entity.add_relationship(rel_type, target_entity)
 
     def add_to_graph(self, entity):
-        query = f"CREATE (n:{entity.entity_type} {{name: $name, description: $description}})"
-        params = {"name": entity.name, "description": entity.description}
-        self.db_manager.execute_query(query, **params)
+        properties = entity.get_all_properties()
+        query = f"CREATE (n:{entity.entity_type} $properties)"
+        self.db_manager.execute_query(query, properties=properties)
         logging.info(f"Added entity to graph: {entity}")
 
-    def add_relationship_to_graph(self, source_node, rel_type, target_node):
-        query = f"MATCH (a {{name: $source}}), (b {{name: $target}}) CREATE (a)-[:{rel_type}]->(b)"
-        params = {"source": source_node["name"], "target": target_node["name"]}
-        self.db_manager.execute_query(query, **params)
-        logging.info(
-            f"Added relationship to graph: {source_node['name']} -{rel_type}-> {target_node['name']}"
+    def add_relationship_to_graph(self, relationship):
+        query = f"""
+        MATCH (a {{name: $source_name}}), (b {{name: $target_name}})
+        CREATE (a)-[r:{relationship.rel_type} $properties]->(b)
+        """
+        properties = relationship.get_all_properties()
+        source_name = properties.pop("source").name
+        target_name = properties.pop("target").name
+        rel_type = properties.pop("rel_type")
+        self.db_manager.execute_query(
+            query,
+            source_name=source_name,
+            target_name=target_name,
+            properties=properties,
         )
+        logging.info(f"Added relationship to graph: {relationship}")
 
     def populate_graph(self):
         logging.info("Populating graph...")
@@ -104,12 +152,7 @@ class World:
 
             for entity in self.entities.values():
                 for relationship in entity.relationships:
-                    target_entity = self.entities[relationship.target.name]
-                    self.add_relationship_to_graph(
-                        {"name": entity.name},
-                        relationship.rel_type,
-                        {"name": target_entity.name},
-                    )
+                    self.add_relationship_to_graph(relationship)
 
             logging.info("Graph population completed successfully")
         except Exception as e:
@@ -150,20 +193,14 @@ class World:
 
         for result in results:
             node = result["n"]
-            #print(
-            #    f"Name: {node['name']} *** Type: {list(node.labels)[0]} *** Description: '{node['description']}'"
-            #)
-            entities.append({
-                "name": node["name"],
-                "type": list(node.labels)[0],
-                "description": node["description"]
-            })
+            entities.append(dict(node))  # This will include all properties of the node
         return entities
 
     def list_relationships(self, type=None, name=None, description=None):
         query_base = "MATCH (n"
         query_condition = f":{type}" if type else ""
-        query_end = ")-[r]->(m) RETURN n, collect(type(r)) as rel_types, collect(m.name) as target_names"
+        # RED: Update query to return relationship properties
+        query_end = ")-[r]->(m) RETURN n, r, m, properties(r) as rel_props"
 
         conditions = []
         if name:
@@ -175,27 +212,39 @@ class World:
             query_end = " WHERE " + " AND ".join(conditions) + query_end
 
         query = f"{query_base}{query_condition}{query_end}"
-        logging.info(f"Query executed for list_entities command: {query}")
+        logging.info(f"Query executed for list_relationships command: {query}")
 
         results = self.db_manager.execute_query(query)
         relationships = []
         for result in results:
-            node = result["n"]
-            relationship_details = ", ".join([f"{rel_type} -> {target_name}" for rel_type, target_name in
-                                       zip(result["rel_types"], result["target_names"])])
-            #print(
-            #    f"Name: {node['name']} *** Type: {list(node.labels)[0]} *** Description: '{node['description']}' *** Relationships: {relationships}"
-            #)
-            relationships.append({
-                "name": node["name"],
-                "type": list(node.labels)[0],
-                "description": node["description"],
-                "relationships": relationship_details
-            })
+            source = dict(result["n"])
+            relationship = dict(result["r"])
+            target = dict(result["m"])
+            # RED: Include custom relationship properties
+            rel_props = result["rel_props"]
+            relationships.append(
+                {
+                    "source": source,
+                    "relationship": {**relationship, **rel_props},
+                    "target": target,
+                }
+            )
         return relationships
 
-    def add_entity(self, type="not_set", name="not_set", description="not_set"):
-        entity = Entity(name, type, description)
+    def add_relationship(self, source, rel_type, target, properties=None):
+        # RED: Changed parameter names to match CLI command
+        source_entity = self.entities.get(source)
+        target_entity = self.entities.get(target)
+        if not source_entity or not target_entity:
+            raise ValueError("Source or target entity not found.")
+
+        props = eval(properties) if properties else {}
+        relationship = source_entity.add_relationship(rel_type, target_entity, **props)
+        self.add_relationship_to_graph(relationship)
+        return f"Relationship added: {source} -{rel_type}-> {target} with properties: {props}"
+
+    def add_entity(self, entity_type="not_set", name="not_set", description="not_set"):
+        entity = Entity(name, entity_type, description)
         self.entities[name] = entity
         self.add_to_graph(entity)
         print(f"Entity {name} added.")
@@ -203,49 +252,63 @@ class World:
 
         return {
             "name": entity.name,
-            "type": entity.entity_type,
-            "description": entity.description
+            "entity_type": entity.entity_type,
+            "description": entity.description,
         }
 
-    def modify_entity(self, name=None, new_name=None, type=None, description=None):
-        if not name:
-            raise ValueError("Name of the entity to modify is required.")
+def modify_entity(self, name=None, new_name=None, entity_type=None, description=None):
+    if not name:
+        raise ValueError("Name of the entity to modify is required.")
 
-        entity = self.entities.get(name)
-        if not entity:
-            raise ValueError(f"Entity {name} not found.")
+    entity = self.entities.get(name)
+    if not entity:
+        raise ValueError(f"Entity {name} not found.")
 
-        # Update local entity details
-        if new_name:
-            entity.name = new_name
-            self.entities[new_name] = self.entities.pop(name)
-        if type:
-            entity.entity_type = type
-        if description:
-            entity.description = description
+    # Update local entity details
+    if new_name:
+        entity.name = new_name
+        self.entities[new_name] = self.entities.pop(name)
+    if entity_type:
+        entity.entity_type = entity_type
+    if description:
+        entity.description = description
 
-        # Prepare and execute the Cypher query for updating the entity in the database
-        query = """
-        MATCH (n {name: $name})
-        SET n.name = $new_name, n.description = $description, n.type = $type
-        RETURN n
-        """
-        params = {"name": name, "new_name": new_name or name, "description": description or entity.description, "type": type or entity.entity_type}
-        result = self.db_manager.execute_query(query, **params)
+    # Prepare and execute the Cypher query for updating the entity in the database
+    query = """
+    MATCH (n {name: $old_name})
+    SET n = $properties
+    RETURN n
+    """
+    properties = {
+        "name": new_name or name,
+        "entity_type": entity_type or entity.entity_type,
+        "description": description or entity.description
+    }
+    params = {
+        "old_name": name,
+        "properties": properties
+    }
+    result = self.db_manager.execute_query(query, **params)
 
-        if not result:
-            raise ValueError(f"Failed to update entity {name} in the database.")
+    if not result:
+        raise ValueError(f"Failed to update entity {name} in the database.")
 
-        logging.info(f"Entity {name} modified to {new_name if new_name else name}.")
-        return {
-            "name": new_name if new_name else name,
-            "type": type or entity.entity_type,
-            "description": description or entity.description
-        }
+    logging.info(f"Entity {name} modified to {new_name if new_name else name}.")
+    return {
+        "name": new_name if new_name else name,
+        "entity_type": entity_type or entity.entity_type,
+        "description": description or entity.description,
+    }
+
 
 class Command:
     def __init__(
-        self, name: str, description: str, execute: Callable, arguments: Dict = None, aliases: List[str] = None
+        self,
+        name: str,
+        description: str,
+        execute: Callable,
+        arguments: Dict = None,
+        aliases: List[str] = None,
     ):
         self.name = name
         self.description = description
@@ -258,11 +321,15 @@ class Command:
 
 
 class CLI:
+
     def __init__(self, world):
         self.world = world
         self.commands = {}
+        self.register_commands()
 
-    def register_command(self, name, description, execute, arguments=None, aliases=None):
+    def register_command(
+        self, name, description, execute, arguments=None, aliases=None
+    ):
         arguments = arguments or {}
         aliases = aliases or []
         new_command = Command(name, description, execute, arguments, aliases)
@@ -278,62 +345,81 @@ class CLI:
         return True
 
     def validate_argument_pattern(self, args):
-        if len(args) % 2 != 0:
-            return False
-        for i in range(0, len(args), 2):
-            if not args[i].startswith("--") or args[i + 1].strip() == "":
+        if not args:
+            return True  # Allow commands without arguments
+
+        i = 0
+        while i < len(args):
+            if args[i].startswith("--"):
+                if i + 1 >= len(args):
+                    logging.error(f"No value provided for argument {args[i]}")
+                    return False
+
+                # Move to the next argument
+                i += 2
+            else:
+                logging.error(f"Argument {args[i]} does not start with '--'")
                 return False
+
         return True
 
     def split_command_input(self, command_input):
-        parts = shlex.split(command_input)
-        command_name = parts[0]
-        args = parts[1:] if len(parts) > 1 else []
+        # Normalize the command input to ensure consistent parsing
+        command_input = command_input.strip()
+
+        # Attempt to split the command input into command and argument parts
+        try:
+            command_name, args_string = command_input.split(" --", 1)
+            args = shlex.split(
+                "--" + args_string
+            )  # Prepend '--' to ensure correct splitting
+        except ValueError:
+            # If splitting fails, assume the entire input is the command (no arguments)
+            command_name = command_input
+            args = []
+
+        logging.info(f"DEBUG: Split command: name={command_name}, args={args}")
         return command_name, args
 
     def execute_command(self, command_input):
-
         logging.info(f"Start executing command: {command_input}")
-        invalid_arg_present = False
 
         command_name, args = self.split_command_input(command_input)
-        logging.info(f"Command name: {command_name}, args: {args}")
-        if not self.validate_argument_pattern(args):
-            print(
-                "Invalid command pattern. Provide arguments in the format: --arg_name arg_value"
-            )
-            logging.error(
-                "Invalid command pattern. Provide arguments in the format: --arg_name arg_value"
-            )
+        logging.info(f"DEBUG: Parsed command: name={command_name}, args={args}")
+
+        if not command_name:
+            print("Invalid command. Type 'help' for available commands.")
             return
 
-        if command_name in self.commands:
-            command = self.commands[command_name]
+        # Check for both the full command name and its aliases
+        if command_name in self.commands or any(
+            command_name == alias
+            for command in self.commands.values()
+            for alias in command.aliases
+        ):
+            command = self.commands.get(command_name) or next(
+                cmd for cmd in self.commands.values() if command_name in cmd.aliases
+            )
             try:
                 parsed_args = {}
-                for i in range(0, len(args), 2):
+                i = 0
+                while i < len(args):
                     if args[i].startswith("--"):
-                        arg_name = args[i][2:]
-                        # Check if the argument is valid. If not search for the next argument with a leading '--'
-                        if not self.validate_argument_exists(arg_name, command_name):
-                            invalid_arg_present = True
+                        arg_name = args[i][2:]  # Remove '--' prefix
+                        if i + 1 < len(args):
+                            arg_value = args[i + 1]
+                            parsed_args[arg_name] = arg_value
+                            i += 2
+                        else:
+                            parsed_args[arg_name] = None
+                            i += 1
+                    else:
+                        i += 1
+                    logging.info(f"DEBUG: Parsed argument: {arg_name} -> {arg_value}")
 
-                        arg_value = args[i + 1] if i + 1 < len(args) else None
-                        parsed_args[arg_name] = arg_value
-                        logging.info(f"Parsed argument: {arg_name} -> {arg_value}")
-
-                if not invalid_arg_present:
-                    result = command.execute(**parsed_args)
-                    self.display_result(result)
-                    logging.info(f"Command executed: {command_name}")
-                else:
-                    logging.error(
-                        f"Invalid argument present for command: {command_name}. Command ABORTED!"
-                    )
-                    print(
-                        f"Invalid argument present for command: {command_name}. Command ABORTED!"
-                    )
-
+                result = command.execute(**parsed_args)
+                self.display_result(result)
+                logging.info(f"Command executed: {command_name}")
             except Exception as e:
                 logging.error(f"Error executing command: {e}")
                 print(f"Error executing command: {e}")
@@ -375,6 +461,84 @@ class CLI:
                 print(line)
             print("")
 
+    def register_commands(self):
+        self.register_command(
+            "list_entities",
+            "List entities in the world",
+            self.world.list_entities,
+            {
+                "type": {
+                    "help": "Type of entities to list, e.g., Character, Location, Artifact"
+                },
+                "name": {"help": "Filter entities by name or part of the name"},
+                "description": {
+                    "help": "Filter entities by description or part of the description"
+                },
+            },
+            aliases=["le"],
+        )
+
+        self.register_command(
+            "list_relationships",
+            "List relationships in the world",
+            self.world.list_relationships,
+            {
+                "type": {
+                    "help": "Type of entities to list, e.g., Character, Location, Artifact"
+                },
+                "name": {"help": "Filter entities by name or part of the name"},
+                "description": {
+                    "help": "Filter entities by description or part of the description"
+                },
+            },
+            aliases=["lr"],
+        )
+
+        self.register_command(
+            "add_entity",
+            "Adds an entity to the world",
+            self.world.add_entity,
+            {
+                "entity_type": {
+                    "help": "Type of entity to add, e.g., Character, Location, Artifact"
+                },
+                "name": {"help": "Name of the entity to add"},
+                "description": {"help": "Description of the entity to add"},
+            },
+            aliases=["ae"],
+        )
+
+        self.register_command(
+            "modify_entity",
+            "Edits an entity in the world",
+            self.world.modify_entity,
+            {
+                "entity_type": {
+                    "help": "New type of entity, e.g., Character, Location, Artifact"
+                },
+                "name": {"help": "Name of the entity to edit"},
+                "new_name": {"help": "New name of the entity"},
+                "description": {"help": "New description of the entity"},
+            },
+            aliases=["me"],
+        )
+
+        self.register_command(
+            "add_relationship",
+            "Adds a relationship between two entities",
+            self.world.add_relationship,
+            {
+                "source": {"help": "Name of the source entity"},
+                "rel_type": {"help": "Type of the relationship"},
+                "target": {"help": "Name of the target entity"},
+                "properties": {
+                    "help": "Additional properties for the relationship (optional)"
+                },
+            },
+            aliases=["ar"],
+        )
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -402,71 +566,6 @@ def main():
     print("Graph populated!")
 
     cli = CLI(my_world)
-
-    cli.register_command(
-        "list_entities",
-        "List entities in the world",
-        my_world.list_entities,
-        {
-            "type": {
-                "help": "Type of entities to list, e.g., Character, Location, Artifact"
-            },
-            "name": {"help": "Filter entities by name or part of the name"},
-            "description": {
-                "help": "Filter entities by description or part of the description"
-            },
-        },
-        aliases=["le"]
-    )
-
-    cli.register_command(
-        "list_relationships",
-        "List relationships in the world",
-        my_world.list_relationships,
-        {
-            "type": {
-                "help": "Type of entities to list, e.g., Character, Location, Artifact"
-            },
-            "name": {"help": "Filter entities by name or part of the name"},
-            "description": {
-                "help": "Filter entities by description or part of the description"
-            },
-        },
-        aliases=["lr"]
-    )
-
-    cli.register_command(
-        "add_entity",
-        "Ads an entity to the world",
-        my_world.add_entity,
-        {
-            "type": {
-                "help": "Type of entity to add, e.g., Character, Location, Artifact"
-            },
-            "name": {"help": "Name of the entity to add"},
-            "description": {
-                "help": "Description of the entity to add"
-            },
-        },
-        aliases=["ae"]
-    )
-
-    cli.register_command(
-        "modify_entity",
-        "Edits an entity in the world",
-        my_world.modify_entity,
-        {
-            "type": {
-                "help": "New type of entity, e.g., Character, Location, Artifact"
-            },
-            "name": {"help": "Name of the entity to edit"},
-            "new_name":{"help": "New name of the entity"},
-            "description": {
-                "help": "New description of the entity"
-            },
-        },
-        aliases=["me"]
-    )
 
     cli.run()
     logging.info("---------------------------Application ended")
