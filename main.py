@@ -11,11 +11,11 @@ from typing import Callable, Dict, List
 
 class DatabaseManager:
     def __init__(self, db_uri, db_user, db_password):
-        self.graph = Graph(db_uri, auth=(db_user, db_password))
-
-    def clear_graph(self):
-        self.graph.run("MATCH (n) DETACH DELETE n")
-        logging.info("Graph cleared")
+        try:
+            self.graph = Graph(db_uri, auth=(db_user, db_password))
+        except Exception as e:
+            logging.error(f"Error connecting to the database: {e}")
+            raise
 
     def execute_query(self, query, **params):
         try:
@@ -23,6 +23,147 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Error executing query '{query}': {e}")
             raise
+
+
+class GraphDatabaseOperations:
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+
+    # Graph Operations
+
+    def clear_graph(self):
+        query = "MATCH (n) DETACH DELETE n"
+        self.db_manager.execute_query(query)
+        logging.info("Graph cleared.")
+
+    # Entity Operations
+
+    def create_entity(self, entity):
+        query = """
+        CREATE (n:Entity $properties)
+        RETURN n
+        """
+        result = self.db_manager.execute_query(
+            query, properties=entity.get_all_properties()
+        )
+        return result[0]["n"] if result else None
+
+    def bulk_create_entities(self, entities):
+        query = """
+        UNWIND $entities AS entity
+        CREATE (n:Entity)
+        SET n = entity
+        """
+        self.db_manager.execute_query(
+            query, entities=[entity.get_all_properties() for entity in entities]
+        )
+
+    def read_entity(self, name):
+        query = """
+        MATCH (n:Entity {name: $name})
+        RETURN n
+        """
+        result = self.db_manager.execute_query(query, name=name)
+        return result[0]["n"] if result else None
+
+    def update_entity(self, name, updated_properties):
+        query = """
+        MATCH (n:Entity {name: $name})
+        SET n += $properties
+        RETURN n
+        """
+        result = self.db_manager.execute_query(
+            query, name=name, properties=updated_properties
+        )
+        return result[0]["n"] if result else None
+
+    def delete_entity(self, name):
+        query = """
+        MATCH (n:Entity {name: $name})
+        DETACH DELETE n
+        """
+        self.db_manager.execute_query(query, name=name)
+
+    # Relationship Operations
+
+    def create_relationship(self, source_name, rel_type, target_name, properties=None):
+        # Use an f-string to include the rel_type directly in the query
+        query = f"""
+        MATCH (a:Entity {{name: $source_name}}), (b:Entity {{name: $target_name}})
+        CREATE (a)-[r:{rel_type}]->(b)
+        SET r = $properties
+        RETURN r
+        """
+        properties = properties or {}
+        result = self.db_manager.execute_query(
+            query,
+            source_name=source_name,
+            target_name=target_name,
+            properties=properties,
+        )
+        return result[0]["r"] if result else None
+
+    def bulk_create_relationships(self, relationships):
+        for rel in relationships:
+            query = f"""
+            MATCH (a:Entity {{name: $source}}), (b:Entity {{name: $target}})
+            CREATE (a)-[r:{rel['type']}]->(b)
+            SET r = $properties
+            """
+            self.db_manager.execute_query(
+                query,
+                source=rel["source"],
+                target=rel["target"],
+                properties=rel["properties"],
+            )
+
+    def read_relationships(self, entity_name, rel_type=None):
+        query = """
+        MATCH (n:Entity {name: $name})-[r]->(m:Entity)
+        WHERE $rel_type IS NULL OR type(r) = $rel_type
+        RETURN r, m
+        """
+        result = self.db_manager.execute_query(
+            query, name=entity_name, rel_type=rel_type
+        )
+        return [(r["r"], r["m"]) for r in result]
+
+    def delete_relationship(self, source_name, rel_type, target_name):
+        query = """
+        MATCH (a:Entity {name: $source_name})-[r:$rel_type]->(b:Entity {name: $target_name})
+        DELETE r
+        """
+        self.db_manager.execute_query(
+            query, source_name=source_name, rel_type=rel_type, target_name=target_name
+        )
+
+    # Query Operations
+
+    def query_entities(self, entity_type=None, name=None, description=None):
+        query = """
+        MATCH (n:Entity)
+        WHERE ($entity_type IS NULL OR n.entity_type = $entity_type)
+          AND ($name IS NULL OR n.name CONTAINS $name)
+          AND ($description IS NULL OR n.description CONTAINS $description)
+        RETURN n
+        """
+        result = self.db_manager.execute_query(
+            query, entity_type=entity_type, name=name, description=description
+        )
+        return [r["n"] for r in result]
+
+    def query_relationships(self, source_type=None, rel_type=None, target_type=None):
+        query = """
+        MATCH (a:Entity)-[r]->(b:Entity)
+        WHERE ($source_type IS NULL OR a.entity_type = $source_type)
+          AND ($rel_type IS NULL OR type(r) = $rel_type)
+          AND ($target_type IS NULL OR b.entity_type = $target_type)
+        RETURN a, r, b
+        """
+        result = self.db_manager.execute_query(
+            query, source_type=source_type, rel_type=rel_type, target_type=target_type
+        )
+        return [(r["a"], r["r"], r["b"]) for r in result]
 
 
 class Entity:
@@ -100,6 +241,7 @@ class Relationship:
 class World:
     def __init__(self, db_uri, db_user, db_password):
         self.db_manager = DatabaseManager(db_uri, db_user, db_password)
+        self.db_operations = GraphDatabaseOperations(self.db_manager)
         self.entities = {}
 
     def load_data(self, file_path):
@@ -109,6 +251,7 @@ class World:
             for column in df.columns:
                 if column not in ["name", "type", "description", "relationships"]:
                     entity.set_property(column, row[column])
+            self.db_operations.create_entity(entity)
             self.entities[entity.name] = entity
 
         for _, row in df.iterrows():
@@ -119,51 +262,37 @@ class World:
                     rel_type, rel_target = rel.split(":")
                     target_entity = self.entities.get(rel_target)
                     if target_entity:
-                        entity.add_relationship(rel_type, target_entity)
-
-    def add_to_graph(self, entity):
-        properties = entity.get_all_properties()
-        query = f"CREATE (n:{entity.entity_type} $properties)"
-        self.db_manager.execute_query(query, properties=properties)
-        logging.info(f"Added entity to graph: {entity}")
-
-    def add_relationship_to_graph(self, relationship):
-        query = f"""
-        MATCH (a {{name: $source_name}}), (b {{name: $target_name}})
-        CREATE (a)-[r:{relationship.rel_type} $properties]->(b)
-        """
-        properties = relationship.get_all_properties()
-        source_name = properties.pop("source").name
-        target_name = properties.pop("target").name
-        rel_type = properties.pop("rel_type")
-        self.db_manager.execute_query(
-            query,
-            source_name=source_name,
-            target_name=target_name,
-            properties=properties,
-        )
-        logging.info(f"Added relationship to graph: {relationship}")
+                        self.db_operations.create_relationship(
+                            entity.name, rel_type, target_entity.name
+                        )
 
     def populate_graph(self):
         logging.info("Populating graph...")
         try:
-            for entity in self.entities.values():
-                self.add_to_graph(entity)
+            self.db_operations.bulk_create_entities(self.entities.values())
 
-            for entity in self.entities.values():
-                for relationship in entity.relationships:
-                    self.add_relationship_to_graph(relationship)
+            all_relationships = [
+                {
+                    "source": relationship.source.name,
+                    "target": relationship.target.name,
+                    "type": relationship.rel_type,
+                    "properties": relationship.get_all_properties(),
+                }
+                for entity in self.entities.values()
+                for relationship in entity.relationships
+            ]
+            self.db_operations.bulk_create_relationships(all_relationships)
 
             logging.info("Graph population completed successfully")
         except Exception as e:
             logging.error(f"Error populating graph: {e}")
             raise
 
-    def query_graph(self, query):
-        return self.db_manager.execute_query(query)
+    def query_graph(self, query, **params):
+        return self.db_operations.db_manager.execute_query(query, **params)
 
     def clear_graph(self):
-        self.db_manager.clear_graph()
+        self.db_operations.clear_graph()
 
     def __repr__(self):
         return f"World with {len(self.entities)} entities"
@@ -171,132 +300,61 @@ class World:
     # CLI commands
 
     def list_entities(self, type=None, name=None, description=None):
-        query_base = "MATCH (n"
-        query_condition = f":{type}" if type else ""
-        query_end = ") RETURN n"
+        entities = self.db_operations.query_entities(type, name, description)
+        return [dict(entity) for entity in entities]
 
-        conditions = []
-        if name:
-            conditions.append(f"n.name CONTAINS '{name}'")
-        if description:
-            conditions.append(f"n.description CONTAINS '{description}'")
-
-        if conditions:
-            query_end = " WHERE " + " AND ".join(conditions) + query_end
-
-        query = f"{query_base}{query_condition}{query_end}"
-        logging.info(f"Query executed for list_entities command: {query}")
-
-        results = self.db_manager.execute_query(query)
-
-        entities = []
-
-        for result in results:
-            node = result["n"]
-            entities.append(dict(node))  # This will include all properties of the node
-        return entities
-
-    def list_relationships(self, type=None, name=None, description=None):
-        query_base = "MATCH (n"
-        query_condition = f":{type}" if type else ""
-        # RED: Update query to return relationship properties
-        query_end = ")-[r]->(m) RETURN n, r, m, properties(r) as rel_props"
-
-        conditions = []
-        if name:
-            conditions.append(f"n.name CONTAINS '{name}'")
-        if description:
-            conditions.append(f"n.description CONTAINS '{description}'")
-
-        if conditions:
-            query_end = " WHERE " + " AND ".join(conditions) + query_end
-
-        query = f"{query_base}{query_condition}{query_end}"
-        logging.info(f"Query executed for list_relationships command: {query}")
-
-        results = self.db_manager.execute_query(query)
-        relationships = []
-        for result in results:
-            source = dict(result["n"])
-            relationship = dict(result["r"])
-            target = dict(result["m"])
-            # RED: Include custom relationship properties
-            rel_props = result["rel_props"]
-            relationships.append(
+    def list_relationships(self, source_type=None, rel_type=None, target_type=None):
+        relationships = self.db_operations.query_relationships(
+            source_type, rel_type, target_type
+        )
+        return (
+            [
                 {
-                    "source": source,
-                    "relationship": {**relationship, **rel_props},
-                    "target": target,
+                    "source": rel["source"],
+                    "relationship": rel["relationship"],
+                    "target": rel["target"],
                 }
-            )
-        return relationships
+                for rel in relationships
+            ]
+            if relationships
+            else []
+        )
 
     def add_relationship(self, source, rel_type, target, properties=None):
-        # RED: Changed parameter names to match CLI command
         source_entity = self.entities.get(source)
         target_entity = self.entities.get(target)
         if not source_entity or not target_entity:
-            raise ValueError("Source or target entity not found.")
+            return None
+        created_relationship = self.db_operations.create_relationship(
+            source, rel_type, target, properties
+        )
+        if created_relationship:
+            source_entity.add_relationship(rel_type, target_entity, **properties or {})
+        return created_relationship
 
-        props = eval(properties) if properties else {}
-        relationship = source_entity.add_relationship(rel_type, target_entity, **props)
-        self.add_relationship_to_graph(relationship)
-        return f"Relationship added: {source} -{rel_type}-> {target} with properties: {props}"
-
-    def add_entity(self, entity_type="not_set", name="not_set", description="not_set"):
+    def add_entity(self, entity_type, name, description):
         entity = Entity(name, entity_type, description)
-        self.entities[name] = entity
-        self.add_to_graph(entity)
-        print(f"Entity {name} added.")
-        logging.info(f"Entity added: {entity}")
+        created_entity = self.db_operations.create_entity(entity)
+        if created_entity:
+            self.entities[name] = entity
+        return dict(created_entity) if created_entity else None
 
-        return {
-            "name": entity.name,
-            "entity_type": entity.entity_type,
-            "description": entity.description,
-        }
+    def modify_entity(self, name, new_name=None, entity_type=None, description=None):
+        updated_properties = {}
+        if new_name:
+            updated_properties["name"] = new_name
+        if entity_type:
+            updated_properties["entity_type"] = entity_type
+        if description:
+            updated_properties["description"] = description
 
-
-def modify_entity(self, name=None, new_name=None, entity_type=None, description=None):
-    if not name:
-        raise ValueError("Name of the entity to modify is required.")
-
-    entity = self.entities.get(name)
-    if not entity:
-        raise ValueError(f"Entity {name} not found.")
-
-    # Update local entity details
-    if new_name:
-        entity.name = new_name
-        self.entities[new_name] = self.entities.pop(name)
-    if entity_type:
-        entity.entity_type = entity_type
-    if description:
-        entity.description = description
-
-    # Prepare and execute the Cypher query for updating the entity in the database
-    query = """
-    MATCH (n {name: $old_name})
-    SET n = $properties
-    RETURN n
-    """
-    properties = {
-        "name": new_name or name,
-        "entity_type": entity_type or entity.entity_type,
-        "description": description or entity.description,
-    }
-    params = {"old_name": name, "properties": properties}
-    result = self.db_manager.execute_query(query, **params)
-
-    if not result:
-        raise ValueError(f"Failed to update entity {name} in the database.")
-
-    logging.info(f"Entity {name} modified to {new_name if new_name else name}.")
-    return {
-        "name": new_name if new_name else name,
-        "entity_type": entity_type or entity.entity_type,
-        "description": description or entity.description,
-    }
+        updated_entity = self.db_operations.update_entity(name, updated_properties)
+        if updated_entity:
+            if new_name:
+                self.entities[new_name] = self.entities.pop(name, None)
+            if name in self.entities:
+                self.entities[name].update(updated_properties)
+        return dict(updated_entity) if updated_entity else None
 
 
 class Command:
@@ -481,13 +539,9 @@ class CLI:
             "List relationships in the world",
             self.world.list_relationships,
             {
-                "type": {
-                    "help": "Type of entities to list, e.g., Character, Location, Artifact"
-                },
-                "name": {"help": "Filter entities by name or part of the name"},
-                "description": {
-                    "help": "Filter entities by description or part of the description"
-                },
+                "source_type": {"help": "Type of source entities"},
+                "rel_type": {"help": "Type of relationship"},
+                "target_type": {"help": "Type of target entities"},
             },
             aliases=["lr"],
         )
