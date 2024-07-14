@@ -1,6 +1,7 @@
 name,type,description,relationships
 Eldoria,Kingdom,"A prosperous kingdom known for its rich culture.",[]
-Alara,Character,"A brave warrior from Eldoria.",["Kingdom:Eldoria"]
+Seafarer's Cove,Location,"A hidden bay where Blackheart's ship is docked.",[]
+Alara,Character,"A brave warrior from Eldoria.",["Kingdom:Eldoria","Location:Silverlake"]
 Thornwood Forest,Location,"A dark and mysterious forest.",[]
 Crystal of Life,Artifact,"A magical crystal that grants eternal youth.",[]
 Gorak,Character,"A fierce orc chieftain from the Shadowlands.",["Kingdom:Shadowlands"]

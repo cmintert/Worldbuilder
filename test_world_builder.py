@@ -114,6 +114,100 @@ class TestWorldBuilder(unittest.TestCase):
             "John Doe", {"name": "Jane Doe", "description": "Modified description"}
         )
 
+    def test_add_property(self):
+        # Arrange
+        mock_entity = MagicMock(spec=Entity)
+        self.world.entities["John Doe"] = mock_entity
+        mock_updated_entity = {
+            "name": "John Doe",
+            "entity_type": "Character",
+            "description": "A test character",
+            "new_property": "new value",
+        }
+        self.world.db_operations.update_entity.return_value = mock_updated_entity
+
+        # Act
+        result = self.world.add_property("John Doe", "new_property", "new value")
+
+        # Assert
+        self.assertEqual(result, mock_updated_entity)
+        mock_entity.set_property.assert_called_once_with("new_property", "new value")
+        self.world.db_operations.update_entity.assert_called_once_with(
+            "John Doe", {"new_property": "new value"}
+        )
+
+    def test_modify_property(self):
+        # Arrange
+        mock_entity = MagicMock(spec=Entity)
+        mock_entity.get_all_properties.return_value = {"existing_property": "old value"}
+        self.world.entities["John Doe"] = mock_entity
+        mock_updated_entity = {
+            "name": "John Doe",
+            "entity_type": "Character",
+            "description": "A test character",
+            "existing_property": "new value",
+        }
+        self.world.db_operations.update_entity.return_value = mock_updated_entity
+
+        # Act
+        result = self.world.modify_property(
+            "John Doe", "existing_property", "new value"
+        )
+
+        # Assert
+        self.assertEqual(result, mock_updated_entity)
+        mock_entity.set_property.assert_called_once_with(
+            "existing_property", "new value"
+        )
+        self.world.db_operations.update_entity.assert_called_once_with(
+            "John Doe", {"existing_property": "new value"}
+        )
+
+    def test_delete_property(self):
+        # Arrange
+        mock_entity = MagicMock(spec=Entity)
+        mock_entity.get_all_properties.return_value = {
+            "name": "John Doe",
+            "entity_type": "Character",
+            "description": "A test character",
+            "deletable_property": "value",
+        }
+        self.world.entities["John Doe"] = mock_entity
+        mock_updated_entity = {
+            "name": "John Doe",
+            "entity_type": "Character",
+            "description": "A test character",
+        }
+        self.world.db_operations.update_entity.return_value = mock_updated_entity
+
+        # Act
+        result = self.world.delete_property("John Doe", "deletable_property")
+
+        # Assert
+        self.assertEqual(result, mock_updated_entity)
+        mock_entity.delete_property.assert_called_once_with("deletable_property")
+        self.world.db_operations.update_entity.assert_called_once_with(
+            "John Doe",
+            {
+                "name": "John Doe",
+                "entity_type": "Character",
+                "description": "A test character",
+            },
+        )
+
+    def test_delete_core_property(self):
+        # Arrange
+        mock_entity = MagicMock(spec=Entity)
+        self.world.entities["John Doe"] = mock_entity
+
+        # Act
+        result = self.world.delete_property("John Doe", "name")
+
+        # Assert
+        self.assertIsNone(result)
+        mock_entity.delete_property.assert_not_called()
+        self.world.db_operations.update_entity.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
