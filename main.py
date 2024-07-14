@@ -460,6 +460,17 @@ class World:
         logging.info(
             f"Starting modify_entity for name: {name} with new_name: {new_name}, entity_type: {entity_type}, description: {description}")
 
+        updated_properties = self.get_updated_properties(new_name, entity_type, description)
+        logging.info(f"Updated properties to be applied: {updated_properties}")
+
+        updated_entity = self.update_entity_in_db(name, updated_properties)
+
+        if updated_entity:
+            self.update_entity_in_memory(name, new_name, updated_properties)
+
+        return dict(updated_entity) if updated_entity else None
+
+    def get_updated_properties(self, new_name, entity_type, description):
         updated_properties = {}
         if new_name:
             updated_properties["name"] = new_name
@@ -467,42 +478,40 @@ class World:
             updated_properties["entity_type"] = entity_type
         if description:
             updated_properties["description"] = description
+        return updated_properties
 
-        logging.info(f"Updated properties to be applied: {updated_properties}")
+    def update_entity_in_db(self, name, updated_properties):
+        if not hasattr(self.db_operations, 'update_entity'):
+            logging.error("db_operations object does not have update_entity method.")
+            raise AttributeError("update_entity method is not defined in db_operations.")
 
-        updated_entity = None
         try:
-            if not hasattr(self.db_operations, 'update_entity'):
-                logging.error(f"db_operations object does not have update_entity method.")
-                raise AttributeError("update_entity method is not defined in db_operations.")
-
             updated_entity = self.db_operations.update_entity(name, updated_properties)
             logging.info(f"Update entity result: {updated_entity}")
         except Exception as e:
             logging.error(
                 f"Error updating entity in database for name: {name} with updated_properties: {updated_properties}: {e}")
             raise
+        return updated_entity
 
-        if updated_entity:
-            try:
-                if new_name:
-                    self.entities[new_name] = self.entities.pop(name, None)
-                    logging.info(f"Updated internal entities dictionary: renamed {name} to {new_name}")
-            except Exception as e:
-                logging.error(f"Error updating internal dictionary for renaming {name} to {new_name}: {e}")
-                raise
+    def update_entity_in_memory(self, name, new_name, updated_properties):
+        try:
+            if new_name:
+                self.entities[new_name] = self.entities.pop(name, None)
+                logging.info(f"Updated internal entities dictionary: renamed {name} to {new_name}")
+        except Exception as e:
+            logging.error(f"Error updating internal dictionary for renaming {name} to {new_name}: {e}")
+            raise
 
-            try:
-                if name in self.entities and self.entities[name]:
-                    logging.info(f"Entity before update: {self.entities[name]}")
-                    self.entities[name].__dict__.update(updated_properties)
-                    logging.info(
-                        f"Updated properties in internal entities dictionary for {name}: {self.entities[name]}")
-            except Exception as e:
-                logging.error(f"Error updating properties in internal entities dictionary for {name}: {e}")
-                raise
-
-        return dict(updated_entity) if updated_entity else None
+        try:
+            if name in self.entities and self.entities[name]:
+                logging.info(f"Entity before update: {self.entities[name]}")
+                self.entities[name].__dict__.update(updated_properties)
+                logging.info(
+                    f"Updated properties in internal entities dictionary for {name}: {self.entities[name]}")
+        except Exception as e:
+            logging.error(f"Error updating properties in internal entities dictionary for {name}: {e}")
+            raise
 
     def add_property(self, name, property_name, property_value):
         entity = self.entities.get(name)
@@ -676,22 +685,7 @@ class CLI:
             return
 
         try:
-            parsed_args = {}
-            i = 0
-            while i < len(args):
-                if args[i].startswith("--"):
-                    arg_name = args[i][2:]
-                    if i + 1 < len(args):
-                        arg_value = args[i + 1]
-                        parsed_args[arg_name] = arg_value
-                        logging.info(f"Parsed argument: {arg_name} -> {arg_value}")
-                        i += 2
-                    else:
-                        logging.error(f"No value provided for argument {args[i]}")
-                        raise ValueError(f"No value provided for argument {args[i]}")
-                else:
-                    logging.error(f"Invalid argument format: {args[i]}")
-                    raise ValueError(f"Invalid argument format: {args[i]}")
+            parsed_args = self.parse_arguments(args)
 
             if command.execute is None:
                 logging.error(f"Command execute method is None for command: {command_name}")
@@ -707,6 +701,25 @@ class CLI:
         except Exception as e:
             logging.error(f"Error executing command '{command_name}' with args {parsed_args}: {e}")
             print(f"Error executing command in execute_command method: {e}")
+
+    def parse_arguments(self, args):
+        parsed_args = {}
+        i = 0
+        while i < len(args):
+            if args[i].startswith("--"):
+                arg_name = args[i][2:]
+                if i + 1 < len(args):
+                    arg_value = args[i + 1]
+                    parsed_args[arg_name] = arg_value
+                    logging.info(f"Parsed argument: {arg_name} -> {arg_value}")
+                    i += 2
+                else:
+                    logging.error(f"No value provided for argument {args[i]}")
+                    raise ValueError(f"No value provided for argument {args[i]}")
+            else:
+                logging.error(f"Invalid argument format: {args[i]}")
+                raise ValueError(f"Invalid argument format: {args[i]}")
+        return parsed_args
 
     def run(self):
         print("Enter your command or type 'help' for instructions or 'exit' to quit.")
@@ -735,22 +748,30 @@ class CLI:
         elif isinstance(result, str):
             print(result)
         elif isinstance(result, list):
-            for item in result:
-                if isinstance(item, dict) and "dynamic_properties" in item:
-                    print(f"Name: {item.get('name')}")
-                    print(f"Type: {item.get('entity_type')}")
-                    print(f"Description: {item.get('description')}")
-                    if item["dynamic_properties"]:
-                        print("Dynamic Properties:")
-                        for key, value in item["dynamic_properties"].items():
-                            print(f"  {key}: {value}")
-                    print("---")
-                else:
-                    print(item)
-                print("")
+            self.display_list_result(result)
         else:
             print(str(result))
         print("")
+
+    def display_list_result(self, result_list):
+        for item in result_list:
+            self.display_item_result(item)
+            print("")
+
+    def display_item_result(self, item):
+        if isinstance(item, dict) and "dynamic_properties" in item:
+            self.display_dict_result(item)
+        else:
+            print(item)
+
+    def display_dict_result(self, item_dict):
+        print(f"Name: {item_dict.get('name')}")
+        print(f"Type: {item_dict.get('entity_type')}")
+        print(f"Description: {item_dict.get('description')}")
+        if item_dict["dynamic_properties"]:
+            print("Dynamic Properties:")
+            for key, value in item_dict["dynamic_properties"].items():
+                print(f"  {key}: {value}")
 
     def register_commands(self):
         self.register_command(
