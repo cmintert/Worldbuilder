@@ -150,8 +150,7 @@ class GraphDatabaseOperations:
         query = f"""
         MATCH (a:Entity {{name: $source_name}}), (b:Entity {{name: $target_name}})
         CREATE (a)-[r:{sanitized_type}]->(b)
-        SET r = $properties
-        SET r.original_type = $rel_type
+        SET r.original_type = "{rel_type}"
         RETURN r
         """
         properties = properties or {}
@@ -432,13 +431,18 @@ class World:
     def add_relationship(self, source, rel_type, target, properties=None):
         source_entity = self.entities.get(source)
         target_entity = self.entities.get(target)
-        if not source_entity or not target_entity:
-            return None
+        if not source_entity:
+            logging.error(f"Source entity '{source}' does not exist.")
+            raise ValueError(f"Source entity '{source}' does not exist.")
+        if not target_entity:
+            logging.error(f"Target entity '{target}' does not exist.")
+            raise ValueError(f"Target entity '{target}' does not exist.")
         created_relationship = self.db_operations.create_relationship(
             source, rel_type, target, properties
         )
         if created_relationship:
             source_entity.add_relationship(rel_type, target_entity, **properties or {})
+            logging.info(f"Relationship '{rel_type}' added between '{source}' and '{target}'.")
         return created_relationship
 
     def add_entity(self, entity_type, name, description):
