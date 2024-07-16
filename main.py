@@ -1,15 +1,24 @@
+from __future__ import annotations
+
 import os
 import logging
 import shlex
 import json
 
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
+from prompt_toolkit.shortcuts import prompt
+from prompt_toolkit.formatted_text import HTML
+
 from py2neo import Graph
 from dotenv import load_dotenv
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple, Any, Optional
 
 
 class DatabaseManager:
-    def __init__(self, db_uri, db_user, db_password):
+    def __init__(self, db_uri: str, db_user: str, db_password: str) -> None:
         try:
             self.graph = Graph(db_uri, auth=(db_user, db_password))
             logging.info("Connected to the database successfully.")
@@ -17,7 +26,9 @@ class DatabaseManager:
             logging.error(f"Error connecting to the database: {e}")
             raise
 
-    def execute_query(self, query, **params):
+    def execute_query(
+        self, query: str, **params: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
         logging.info(f"Executing query: {query.strip()}")
         try:
             result = self.graph.run(query, **params).data()
@@ -29,15 +40,15 @@ class DatabaseManager:
 
 
 class GraphDatabaseOperations:
-    def __init__(self, db_manager):
+    def __init__(self, db_manager: DatabaseManager) -> None:
         self.db_manager = db_manager
 
     # Graph Operations
 
-    def sanitize_rel_type(self, rel_type):
-        return rel_type.replace(' ', '_').upper()
+    def sanitize_rel_type(self, rel_type: str) -> str:
+        return rel_type.replace(" ", "_").upper()
 
-    def clear_graph(self):
+    def clear_graph(self) -> None:
         query = "MATCH (n) DETACH DELETE n"
         try:
             self.db_manager.execute_query(query)
@@ -48,7 +59,7 @@ class GraphDatabaseOperations:
 
     # Entity Operations
 
-    def create_entity(self, entity):
+    def create_entity(self, entity: "Entity") -> Optional[Dict[str, Any]]:
         query = """
         CREATE (n:Entity $properties)
         RETURN n
@@ -70,7 +81,7 @@ class GraphDatabaseOperations:
             logging.error(f"Error during entity creation: {e}")
             raise
 
-    def bulk_create_entities(self, entities):
+    def bulk_create_entities(self, entities: List["Entity"]) -> None:
         print(f"Starting bulk creation of {len(entities)} entities.")
         logging.info(f"Starting bulk creation of {len(entities)} entities.")
         query = """
@@ -87,7 +98,7 @@ class GraphDatabaseOperations:
             logging.error(f"Error during bulk entity creation/update: {e}")
             raise
 
-    def read_entity(self, name):
+    def read_entity(self, name: str) -> Dict[str, Any]:
         query = """
         MATCH (n:Entity {name: $name})
         RETURN n
@@ -95,7 +106,9 @@ class GraphDatabaseOperations:
         result = self.db_manager.execute_query(query, name=name)
         return result[0]["n"] if result else None
 
-    def update_entity(self, name, updated_properties):
+    def update_entity(
+        self, name: str, updated_properties: Dict[str, Any]
+    ) -> Dict[str, Any]:
         # Fetch existing properties to avoid overwriting
         existing_entity = self.read_entity(name)
         if not existing_entity:
@@ -134,7 +147,7 @@ class GraphDatabaseOperations:
         )
         return result[0]["n"] if result else None
 
-    def delete_entity(self, name):
+    def delete_entity(self, name: str) -> None:
         query = """
         MATCH (n:Entity {name: $name})
         DETACH DELETE n
@@ -143,8 +156,14 @@ class GraphDatabaseOperations:
 
     # Relationship Operations
 
-    def create_relationship(self, source_name, rel_type, target_name, properties=None):
-        # Use an f-string to include the rel_type directly in the query
+    def create_relationship(
+        self,
+        source_name: str,
+        rel_type: str,
+        target_name: str,
+        properties: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
+
         sanitized_type = self.sanitize_rel_type(rel_type)
 
         query = f"""
@@ -162,13 +181,13 @@ class GraphDatabaseOperations:
         )
         return result[0]["r"] if result else None
 
-    def bulk_create_relationships(self, relationships):
+    def bulk_create_relationships(self, relationships: List[Dict[str, Any]]) -> None:
         logging.info(f"Starting bulk creation of {len(relationships)} relationships.")
 
         # Group relationships by sanitized type
         rel_groups = {}
         for rel in relationships:
-            sanitized_type = self.sanitize_rel_type(rel['type'])
+            sanitized_type = self.sanitize_rel_type(rel["type"])
             rel_groups.setdefault(sanitized_type, []).append(rel)
 
         total_count = 0
@@ -183,16 +202,22 @@ class GraphDatabaseOperations:
             """
             try:
                 result = self.db_manager.execute_query(query, rels=rels)
-                count = result[0]['count']
+                count = result[0]["count"]
                 total_count += count
                 logging.info(f"Created {count} relationships of type {sanitized_type}")
             except Exception as e:
-                logging.error(f"Error creating relationships of type {sanitized_type}: {e}")
+                logging.error(
+                    f"Error creating relationships of type {sanitized_type}: {e}"
+                )
                 raise
 
-        logging.info(f"Bulk relationship creation completed successfully. Created {total_count} relationships.")
+        logging.info(
+            f"Bulk relationship creation completed successfully. Created {total_count} relationships."
+        )
 
-    def read_relationships(self, entity_name, rel_type=None):
+    def read_relationships(
+        self, entity_name: str, rel_type: str = None
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         query = """
         MATCH (n:Entity {name: $name})-[r]->(m:Entity)
         WHERE $rel_type IS NULL OR type(r) = $rel_type
@@ -203,7 +228,9 @@ class GraphDatabaseOperations:
         )
         return [(r["r"], r["m"]) for r in result]
 
-    def delete_relationship(self, source_name, rel_type, target_name):
+    def delete_relationship(
+        self, source_name: str, rel_type: str, target_name: str
+    ) -> None:
         query = """
         MATCH (a:Entity {name: $source_name})-[r:$rel_type]->(b:Entity {name: $target_name})
         DELETE r
@@ -214,7 +241,9 @@ class GraphDatabaseOperations:
 
     # Query Operations
 
-    def query_entities(self, entity_type=None, name=None, description=None):
+    def query_entities(
+        self, entity_type: str = None, name: str = None, description: str = None
+    ) -> List[Dict[str, Any]]:
 
         logging.info(
             "Querying entities with filters: "
@@ -236,7 +265,9 @@ class GraphDatabaseOperations:
 
         return [r["n"] for r in result]
 
-    def query_relationships(self, source_type=None, rel_type=None, target_type=None):
+    def query_relationships(
+        self, source_type: str = None, rel_type: str = None, target_type: str = None
+    ) -> List[Dict[str, str]]:
         query = """
         MATCH (a:Entity)-[r]->(b:Entity)
         WHERE ($source_type IS NULL OR a.entity_type = $source_type)
@@ -249,7 +280,7 @@ class GraphDatabaseOperations:
         )
         return result
 
-    def get_entity_properties(self, entity_name):
+    def get_entity_properties(self, entity_name: str) -> Dict[str, Any]:
         query = """
         MATCH (n:Entity {name: $name})
         RETURN properties(n) as props
@@ -259,7 +290,9 @@ class GraphDatabaseOperations:
 
 
 class Entity:
-    def __init__(self, name, entity_type, description=None, **properties):
+    def __init__(
+        self, name: str, entity_type: str, description: str = None, **properties: Any
+    ) -> None:
         self._properties = {
             "name": name,
             "entity_type": entity_type,
@@ -268,88 +301,92 @@ class Entity:
         self._properties.update(properties)
         self.relationships = []
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return self._properties.get(name)
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: str, value: Any) -> None:
         if name in ["_properties", "relationships"]:
             super().__setattr__(name, value)
         else:
             self._properties[name] = value
 
-    def get_property(self, name):
+    def get_property(self, name: str) -> Any:
         return self._properties.get(name)
 
-    def set_property(self, name, value):
+    def set_property(self, name: str, value: Any) -> None:
         self._properties[name] = value
 
-    def delete_property(self, name):
+    def delete_property(self, name: str) -> None:
         if name not in ["name", "entity_type", "description"]:
             self._properties.pop(name, None)
 
-    def get_all_properties(self):
+    def get_all_properties(self) -> Dict[str, Any]:
         return self._properties.copy()
 
-    def add_relationship(self, rel_type, target, **properties):
+    def add_relationship(
+        self, rel_type: str, target: "Entity", **properties: Any
+    ) -> "Relationship":
         relationship = Relationship(self, rel_type, target, **properties)
         self.relationships.append(relationship)
         return relationship
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Entity(name={self.name}, type={self.entity_type})"
 
 
 class Relationship:
-    def __init__(self, source, rel_type, target, **properties):
+    def __init__(
+        self, source: Entity, rel_type: str, target: Entity, **properties: Any
+    ) -> None:
         self._properties = {"source": source, "rel_type": rel_type, "target": target}
         self._properties.update(properties)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return self._properties.get(name)
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: str, value: Any) -> None:
         if name == "_properties":
             super().__setattr__(name, value)
         else:
             self._properties[name] = value
 
-    def get_property(self, name):
+    def get_property(self, name: str) -> Any:
         return self._properties.get(name)
 
-    def set_property(self, name, value):
+    def set_property(self, name: str, value: Any) -> None:
         self._properties[name] = value
 
-    def delete_property(self, name):
+    def delete_property(self, name: str) -> None:
         if name not in ["source", "rel_type", "target"]:
             self._properties.pop(name, None)
 
-    def get_all_properties(self):
+    def get_all_properties(self) -> Dict[str, Any]:
         return self._properties.copy()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.source.name} -> {self.rel_type} -> {self.target.name}"
 
 
 class World:
-    def __init__(self, db_uri, db_user, db_password):
+    def __init__(self, db_uri: str, db_user: str, db_password: str) -> None:
         self.db_manager = DatabaseManager(db_uri, db_user, db_password)
         self.db_operations = GraphDatabaseOperations(self.db_manager)
         self.entities = {}
 
-    def load_data(self, file_path):
+    def load_data(self, file_path: str) -> None:
         logging.info(f"Loading data from {file_path}")
-        with open(file_path, 'r') as file:
+        with open(file_path, "r") as file:
             data = json.load(file)
 
         for item in data:
-            entity = Entity(item['name'], item['type'], item['description'])
+            entity = Entity(item["name"], item["type"], item["description"])
 
             # Add relationships
-            for relationship in item.get('relationships', []):
-                entity.add_relationship(relationship['type'], relationship['target'])
+            for relationship in item.get("relationships", []):
+                entity.add_relationship(relationship["type"], relationship["target"])
 
             # Add all properties
-            for prop, value in item.get('properties', {}).items():
+            for prop, value in item.get("properties", {}).items():
                 entity.set_property(prop, value)
 
             logging.info(f"Entity parsed: {entity}")
@@ -357,7 +394,7 @@ class World:
 
         logging.info(f"Entities created: {self.entities.keys()}")
 
-    def populate_graph(self):
+    def populate_graph(self) -> None:
         logging.info("Populating graph...")
         try:
             # Create or update entities
@@ -369,7 +406,7 @@ class World:
                 {
                     "source": relationship.source.name,
                     "target": relationship.target,
-                    "type": relationship.rel_type
+                    "type": relationship.rel_type,
                 }
                 for entity in self.entities.values()
                 for relationship in entity.relationships
@@ -378,25 +415,29 @@ class World:
             if not all_relationships:
                 logging.info("No relationships to create.")
             else:
-                logging.info(f"Attempting to create {len(all_relationships)} relationships.")
+                logging.info(
+                    f"Attempting to create {len(all_relationships)} relationships."
+                )
                 self.db_operations.bulk_create_relationships(all_relationships)
                 logging.info("Relationships created in the graph.")
         except Exception as e:
             logging.error(f"Error populating graph: {e}")
             raise
 
-    def query_graph(self, query, **params):
+    def query_graph(self, query: str, **params: Any) -> List[Dict[str, Any]]:
         return self.db_operations.db_manager.execute_query(query, **params)
 
-    def clear_graph(self):
+    def clear_graph(self) -> None:
         self.db_operations.clear_graph()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"World with {len(self.entities)} entities"
 
     # CLI commands
 
-    def list_entities(self, type=None, name=None, description=None):
+    def list_entities(
+        self, type: str = None, name: str = None, description: str = None
+    ) -> List[Dict[str, Any]]:
         entities = self.db_operations.query_entities(type, name, description)
         detailed_entities = []
         for entity in entities:
@@ -422,13 +463,17 @@ class World:
             else "No entities found matching the criteria."
         )
 
-    def list_relationships(self, source_type=None, rel_type=None, target_type=None):
+    def list_relationships(
+        self, source_type: str = None, rel_type: str = None, target_type: str = None
+    ) -> List[Dict[str, Any]]:
         relationships = self.db_operations.query_relationships(
             source_type, rel_type, target_type
         )
         return relationships
 
-    def add_relationship(self, source, rel_type, target, properties=None):
+    def add_relationship(
+        self, source: str, rel_type: str, target: str, properties: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
         source_entity = self.entities.get(source)
         target_entity = self.entities.get(target)
         if not source_entity:
@@ -442,25 +487,38 @@ class World:
         )
         if created_relationship:
             source_entity.add_relationship(rel_type, target_entity, **properties or {})
-            logging.info(f"Relationship '{rel_type}' added between '{source}' and '{target}'.")
+            logging.info(
+                f"Relationship '{rel_type}' added between '{source}' and '{target}'."
+            )
         return created_relationship
 
-    def add_entity(self, entity_type, name, description):
+    def add_entity(
+        self, entity_type: str, name: str, description: str
+    ) -> Dict[str, Any]:
         entity = Entity(name, entity_type, description)
         logging.info(f"Creating entity: {entity}")
         created_entity = self.db_operations.create_entity(entity)
         if created_entity:
             self.entities[name] = entity
-            logging.info(f"Entity added to internal dictionary: {self.entities[name]}")
+            logging.info(f"Entity added to internal Dictionary: {self.entities[name]}")
         else:
             logging.error(f"Failed to create entity: {entity}")
         return dict(created_entity) if created_entity else None
 
-    def modify_entity(self, name, new_name=None, entity_type=None, description=None):
+    def modify_entity(
+        self,
+        name: str,
+        new_name: str = None,
+        entity_type: str = None,
+        description: str = None,
+    ) -> Dict[str, Any]:
         logging.info(
-            f"Starting modify_entity for name: {name} with new_name: {new_name}, entity_type: {entity_type}, description: {description}")
+            f"Starting modify_entity for name: {name} with new_name: {new_name}, entity_type: {entity_type}, description: {description}"
+        )
 
-        updated_properties = self.get_updated_properties(new_name, entity_type, description)
+        updated_properties = self.get_updated_properties(
+            new_name, entity_type, description
+        )
         logging.info(f"Updated properties to be applied: {updated_properties}")
 
         updated_entity = self.update_entity_in_db(name, updated_properties)
@@ -470,7 +528,9 @@ class World:
 
         return dict(updated_entity) if updated_entity else None
 
-    def get_updated_properties(self, new_name, entity_type, description):
+    def get_updated_properties(
+        self, new_name: str, entity_type: str, description: str
+    ) -> Dict[str, Any]:
         updated_properties = {}
         if new_name:
             updated_properties["name"] = new_name
@@ -480,27 +540,38 @@ class World:
             updated_properties["description"] = description
         return updated_properties
 
-    def update_entity_in_db(self, name, updated_properties):
-        if not hasattr(self.db_operations, 'update_entity'):
+    def update_entity_in_db(
+        self, name: str, updated_properties: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if not hasattr(self.db_operations, "update_entity"):
             logging.error("db_operations object does not have update_entity method.")
-            raise AttributeError("update_entity method is not defined in db_operations.")
+            raise AttributeError(
+                "update_entity method is not defined in db_operations."
+            )
 
         try:
             updated_entity = self.db_operations.update_entity(name, updated_properties)
             logging.info(f"Update entity result: {updated_entity}")
         except Exception as e:
             logging.error(
-                f"Error updating entity in database for name: {name} with updated_properties: {updated_properties}: {e}")
+                f"Error updating entity in database for name: {name} with updated_properties: {updated_properties}: {e}"
+            )
             raise
         return updated_entity
 
-    def update_entity_in_memory(self, name, new_name, updated_properties):
+    def update_entity_in_memory(
+        self, name: str, new_name: str, updated_properties: dict[str, Any]
+    ) -> None:
         try:
             if new_name:
                 self.entities[new_name] = self.entities.pop(name, None)
-                logging.info(f"Updated internal entities dictionary: renamed {name} to {new_name}")
+                logging.info(
+                    f"Updated internal entities dictionary: renamed {name} to {new_name}"
+                )
         except Exception as e:
-            logging.error(f"Error updating internal dictionary for renaming {name} to {new_name}: {e}")
+            logging.error(
+                f"Error updating internal dictionary for renaming {name} to {new_name}: {e}"
+            )
             raise
 
         try:
@@ -508,12 +579,15 @@ class World:
                 logging.info(f"Entity before update: {self.entities[name]}")
                 self.entities[name].__dict__.update(updated_properties)
                 logging.info(
-                    f"Updated properties in internal entities dictionary for {name}: {self.entities[name]}")
+                    f"Updated properties in internal entities dictionary for {name}: {self.entities[name]}"
+                )
         except Exception as e:
-            logging.error(f"Error updating properties in internal entities dictionary for {name}: {e}")
+            logging.error(
+                f"Error updating properties in internal entities dictionary for {name}: {e}"
+            )
             raise
 
-    def add_property(self, name, property_name, property_value):
+    def add_property(self, name: str, property_name: str, property_value: Any) -> str:
         entity = self.entities.get(name)
         if not entity:
             return f"Entity '{name}' not found."
@@ -527,15 +601,13 @@ class World:
             return f"Property '{property_name}' added to entity '{name}'."
         return f"Failed to add property '{property_name}' to entity '{name}'."
 
-    def modify_property(self, name, property_name, new_value):
+    def modify_property(self, name: str, property_name: str, new_value: Any) -> str:
         entity = self.entities.get(name)
         if not entity:
             return f"Entity '{name}' not found."
 
         if property_name not in entity.get_all_properties():
-            return (
-                f"Property '{property_name}' does not exist for entity '{name}'."
-            )
+            return f"Property '{property_name}' does not exist for entity '{name}'."
 
         entity.set_property(property_name, new_value)
         updated_entity = self.db_operations.update_entity(
@@ -546,15 +618,13 @@ class World:
             return f"Property '{property_name}' of entity '{name}' updated to '{new_value}'."
         return f"Failed to update property '{property_name}' of entity '{name}'."
 
-    def delete_property(self, name, property_name):
+    def delete_property(self, name: str, property_name: str) -> str:
         entity = self.entities.get(name)
         if not entity:
             return f"Entity '{name}' not found."
 
         if property_name not in entity.get_all_properties():
-            return (
-                f"Property '{property_name}' does not exist for entity '{name}'."
-            )
+            return f"Property '{property_name}' does not exist for entity '{name}'."
 
         # Don't allow deletion of core properties
         if property_name in ["name", "entity_type", "description"]:
@@ -564,15 +634,11 @@ class World:
 
         # Update the entity in the database
         updated_properties = entity.get_all_properties()
-        updated_entity = self.db_operations.update_entity(
-            name, updated_properties
-        )
+        updated_entity = self.db_operations.update_entity(name, updated_properties)
 
         if updated_entity:
             return f"Property '{property_name}' deleted from entity '{name}'."
-        return (
-            f"Failed to delete property '{property_name}' from entity '{name}'."
-        )
+        return f"Failed to delete property '{property_name}' from entity '{name}'."
 
 
 class Command:
@@ -581,7 +647,7 @@ class Command:
         name: str,
         description: str,
         execute: Callable,
-        arguments: Dict = None,
+        arguments: Dict[str, Dict[str, str]] = None,
         aliases: List[str] = None,
     ):
         self.name = name
@@ -590,19 +656,39 @@ class Command:
         self.arguments = arguments or {}
         self.aliases = aliases or []
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{self.name}, {self.description}, {self.execute}, {self.arguments}, Aliases: {self.aliases}"
 
 
 class CLI:
 
-    def __init__(self, world):
+    def __init__(self, world) -> None:
+        self.completer = None
+        self.session = None
+        self.use_prompt_toolkit = False
         self.world = world
-        self.commands = {}
+        self.commands: Dict[str, Command] = {}
         self.register_commands()
+        self.setup_autocomplete()
+
+    def setup_autocomplete(self):
+        self.completer = WordCompleter(list(self.commands.keys()), ignore_case=True)
+        try:
+            self.session = PromptSession(completer=self.completer)
+            self.use_prompt_toolkit = True
+        except NoConsoleScreenBufferError:
+            self.use_prompt_toolkit = False
+            print(
+                "Advanced console features not available. Falling back to basic input."
+            )
 
     def register_command(
-        self, name, description, execute, arguments=None, aliases=None
+        self,
+        name: str,
+        description: str,
+        execute: Callable,
+        arguments: Dict[str, Dict[str, str]] = None,
+        aliases: List[str] = None,
     ):
         arguments = arguments or {}
         aliases = aliases or []
@@ -612,13 +698,13 @@ class CLI:
             self.commands[alias] = new_command
         logging.info(f"Command registered: {new_command}")
 
-    def validate_argument_exists(self, arg_name, command_name):
+    def validate_argument_exists(self, arg_name: str, command_name: str) -> bool:
         if arg_name not in self.commands[command_name].arguments:
             logging.error(f"Invalid argument for command {command_name}: {arg_name}")
             return False
         return True
 
-    def validate_argument_pattern(self, args):
+    def validate_argument_pattern(self, args: List[str]) -> bool:
         if not args:
             return True  # Allow commands without arguments
 
@@ -637,7 +723,7 @@ class CLI:
 
         return True
 
-    def split_command_input(self, command_input):
+    def split_command_input(self, command_input: str) -> Tuple[str, List[str]]:
         # Normalize the command input to ensure consistent parsing
         command_input = command_input.strip()
 
@@ -655,7 +741,7 @@ class CLI:
         logging.info(f"DEBUG: Split command: name={command_name}, args={args}")
         return command_name, args
 
-    def execute_command(self, command_input):
+    def execute_command(self, command_input: str) -> None:
         logging.info(f"Start executing command: {command_input}")
 
         try:
@@ -681,28 +767,42 @@ class CLI:
 
         if not command:
             logging.error(f"Unknown command: {command_name}")
-            print(f"Unknown command: {command_name}. Type 'help' for available commands.")
+            print(
+                f"Unknown command: {command_name}. Type 'help' for available commands."
+            )
+            return
+
+        if "--help" in args:
+            self.print_command_help(command)
             return
 
         try:
             parsed_args = self.parse_arguments(args)
 
             if command.execute is None:
-                logging.error(f"Command execute method is None for command: {command_name}")
+                logging.error(
+                    f"Command execute method is None for command: {command_name}"
+                )
             else:
-                logging.info(f"Executing command: {command_name} with arguments: {parsed_args}")
+                logging.info(
+                    f"Executing command: {command_name} with arguments: {parsed_args}"
+                )
 
-            result = command.execute(**parsed_args)  # This is where the error might occur
+            result = command.execute(
+                **parsed_args
+            )  # This is where the error might occur
 
             logging.info(f"Command execution result: {result}")
 
             self.display_result(result)
             logging.info(f"Command executed successfully: {command_name}")
         except Exception as e:
-            logging.error(f"Error executing command '{command_name}' with args {parsed_args}: {e}")
+            logging.error(
+                f"Error executing command '{command_name}' with args {parsed_args}: {e}"
+            )
             print(f"Error executing command in execute_command method: {e}")
 
-    def parse_arguments(self, args):
+    def parse_arguments(self, args: List[str]) -> Dict[str, str]:
         parsed_args = {}
         i = 0
         while i < len(args):
@@ -721,28 +821,53 @@ class CLI:
                 raise ValueError(f"Invalid argument format: {args[i]}")
         return parsed_args
 
-    def run(self):
+    def run(self) -> None:
         print("Enter your command or type 'help' for instructions or 'exit' to quit.")
         while True:
-            command_input = input("Command> ").strip()
-            if command_input in ["exit"]:
-                break
-            if command_input == "help":
-                self.print_help()
-                continue
-            self.execute_command(command_input)
+            try:
+                if self.use_prompt_toolkit:
+                    command_input = self.session.prompt(
+                        HTML("<ansiyellow>Command></ansiyellow> "),
+                        completer=self.completer,
+                    ).strip()
+                else:
+                    command_input = self.fallback_input("Command> ").strip()
 
-    def print_help(self):
+                if command_input in ["exit"]:
+                    break
+                if command_input == "help":
+                    self.print_help()
+                    continue
+                self.execute_command(command_input)
+            except EOFError:
+                break
+        print("\nThanks for using Worldbuilder")
+
+    def fallback_input(self, prompt_text):
+        return input(prompt_text)
+
+    def print_help(self) -> None:
         print("Available commands:")
         for name, command in self.commands.items():
             print(f"  {name}: {command.description}")
-            if command.arguments:
-                for arg_name, arg_params in command.arguments.items():
-                    print(
-                        f"    --{arg_name}: {arg_params.get('help', 'No description')}"
-                    )
+        print("\nFor detailed help on a specific command, type '<command_name> --help'")
 
-    def display_result(self, result):
+    def print_command_help(self, command: Command) -> None:
+        print(f"Command: {command.name}")
+        print(f"Description: {command.description}")
+        print("Usage:")
+        usage = f"  {command.name}"
+        for arg_name in command.arguments:
+            usage += f" --{arg_name} <value>"
+        print(usage)
+        print("Arguments:")
+        for arg_name, arg_params in command.arguments.items():
+            print(f"  --{arg_name}: {arg_params.get('help', 'No description')}")
+        if command.aliases:
+            print(f"Aliases: {', '.join(command.aliases)}")
+        print("\nUse --help with any command to see this help message.")
+
+    def display_result(self, result: Any) -> None:
         if result is None:
             print("Operation completed, but no results were returned.")
         elif isinstance(result, str):
@@ -753,18 +878,18 @@ class CLI:
             print(str(result))
         print("")
 
-    def display_list_result(self, result_list):
+    def display_list_result(self, result_list: List[Any]) -> None:
         for item in result_list:
             self.display_item_result(item)
             print("")
 
-    def display_item_result(self, item):
-        if isinstance(item, dict) and "dynamic_properties" in item:
+    def display_item_result(self, item: Any) -> None:
+        if isinstance(item, Dict) and "dynamic_properties" in item:
             self.display_dict_result(item)
         else:
             print(item)
 
-    def display_dict_result(self, item_dict):
+    def display_dict_result(self, item_dict: Dict[str, Any]) -> None:
         print(f"Name: {item_dict.get('name')}")
         print(f"Type: {item_dict.get('entity_type')}")
         print(f"Description: {item_dict.get('description')}")
@@ -773,7 +898,7 @@ class CLI:
             for key, value in item_dict["dynamic_properties"].items():
                 print(f"  {key}: {value}")
 
-    def register_commands(self):
+    def register_commands(self) -> None:
         self.register_command(
             "list_entities",
             "List entities in the world",
@@ -874,16 +999,14 @@ class CLI:
             "Deletes an existing property from an entity",
             self.world.delete_property,
             {
-                "name": {
-                    "help": "Name of the entity to delete the property from"
-                },
+                "name": {"help": "Name of the entity to delete the property from"},
                 "property_name": {"help": "Name of the property to delete"},
             },
             aliases=["dp"],
         )
 
 
-def main():
+def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         filename="app.log",
