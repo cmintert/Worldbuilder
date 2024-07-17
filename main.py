@@ -9,7 +9,6 @@ import json
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
-from prompt_toolkit.shortcuts import prompt
 from prompt_toolkit.formatted_text import HTML
 
 from py2neo import Graph
@@ -27,7 +26,7 @@ class DatabaseManager:
             raise
 
     def execute_query(
-        self, query: str, **params: Dict[str, Any]
+        self, query: str, **params: Any
     ) -> List[Dict[str, Any]]:
         logging.info(f"Executing query: {query.strip()}")
         try:
@@ -261,7 +260,6 @@ class GraphDatabaseOperations:
             "Querying entities with filters: "
             f"entity_type={entity_type}, name={name}, description={description}"
         )
-
 
         result = self.db_manager.execute_query(
             query, entity_type=entity_type, name=name, description=description
@@ -675,11 +673,13 @@ class CLI:
         self.use_prompt_toolkit = False
         self.world = world
         self.commands: Dict[str, Command] = {}
+        self.aliases: Dict[str, str] = {}
         self.register_commands()
         self.setup_autocomplete()
 
     def setup_autocomplete(self):
-        self.completer = WordCompleter(list(self.commands.keys()), ignore_case=True)
+        all_commands = list(self.commands.keys()) + list(self.aliases.keys())
+        self.completer = WordCompleter(all_commands, ignore_case=True)
         try:
             self.session = PromptSession(completer=self.completer)
             self.use_prompt_toolkit = True
@@ -702,32 +702,13 @@ class CLI:
         new_command = Command(name, description, execute, arguments, aliases)
         self.commands[name] = new_command
         for alias in aliases:
-            self.commands[alias] = new_command
+            self.aliases[alias] = name
         logging.info(f"Command registered: {new_command}")
 
     def validate_argument_exists(self, arg_name: str, command_name: str) -> bool:
         if arg_name not in self.commands[command_name].arguments:
             logging.error(f"Invalid argument for command {command_name}: {arg_name}")
             return False
-        return True
-
-    def validate_argument_pattern(self, args: List[str]) -> bool:
-        if not args:
-            return True  # Allow commands without arguments
-
-        i = 0
-        while i < len(args):
-            if args[i].startswith("--"):
-                if i + 1 >= len(args):
-                    logging.error(f"No value provided for argument {args[i]}")
-                    return False
-
-                # Move to the next argument
-                i += 2
-            else:
-                logging.error(f"Argument {args[i]} does not start with '--'")
-                return False
-
         return True
 
     def split_command_input(self, command_input: str) -> Tuple[str, List[str]]:
@@ -750,6 +731,7 @@ class CLI:
 
     def execute_command(self, command_input: str) -> None:
         logging.info(f"Start executing command: {command_input}")
+        parsed_args = {}
 
         try:
             command_name, args = self.split_command_input(command_input)
@@ -764,13 +746,17 @@ class CLI:
             print("Invalid command. Type 'help' for available commands.")
             return
 
+        if command_name in self.aliases:
+            command_name = self.aliases[command_name]
+
         command = self.commands.get(command_name)
-        if not command:
-            # Check aliases if command is not found directly
-            for cmd in self.commands.values():
-                if command_name in cmd.aliases:
-                    command = cmd
-                    break
+
+        # if not command:
+        #    Check aliases if command is not found directly
+        #    for cmd in self.commands.values():
+        #       if command_name in cmd.aliases:
+        #            command = cmd
+        #            break
 
         if not command:
             logging.error(f"Unknown command: {command_name}")
@@ -856,8 +842,11 @@ class CLI:
     def print_help(self) -> None:
         print("Available commands:")
         for name, command in self.commands.items():
-            print(f"  {name}: {command.description}")
-        print("\nFor detailed help on a specific command, type '<command_name> --help'")
+            alias_str = (
+                f" (aliases: {', '.join(command.aliases)})" if command.aliases else ""
+            )
+            print(f"  {name:<15} - {command.description}{alias_str}")
+        print("\nFor detailed help on a specific command, type <command_name> --help")
 
     def print_command_help(self, command: Command) -> None:
         print(f"Command: {command.name}")
