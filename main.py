@@ -82,13 +82,16 @@ class GraphDatabaseOperations:
             raise
 
     def bulk_create_entities(self, entities: List["Entity"]) -> None:
-        print(f"Starting bulk creation of {len(entities)} entities.")
-        logging.info(f"Starting bulk creation of {len(entities)} entities.")
+
         query = """
         UNWIND $entities AS entity
         MERGE (n:Entity {name: entity.name})
         SET n += entity
         """
+
+        print(f"Starting bulk creation of {len(entities)} entities.")
+        logging.info(f"Starting bulk creation of {len(entities)} entities.")
+
         try:
             self.db_manager.execute_query(
                 query, entities=[entity.get_all_properties() for entity in entities]
@@ -109,6 +112,13 @@ class GraphDatabaseOperations:
     def update_entity(
         self, name: str, updated_properties: Dict[str, Any]
     ) -> Dict[str, Any]:
+
+        query = """
+        MATCH (n:Entity {name: $name})
+        SET n += $properties
+        RETURN n
+        """
+
         # Fetch existing properties to avoid overwriting
         existing_entity = self.read_entity(name)
         if not existing_entity:
@@ -122,12 +132,6 @@ class GraphDatabaseOperations:
         merged_properties = {**existing_entity, **updated_properties}
 
         logging.info(f"Merged properties: {merged_properties}")
-
-        query = """
-        MATCH (n:Entity {name: $name})
-        SET n += $properties
-        RETURN n
-        """
 
         logging.info(
             f"Executing query: {query.strip()} with name={name} and properties={merged_properties}"
@@ -245,11 +249,6 @@ class GraphDatabaseOperations:
         self, entity_type: str = None, name: str = None, description: str = None
     ) -> List[Dict[str, Any]]:
 
-        logging.info(
-            "Querying entities with filters: "
-            f"entity_type={entity_type}, name={name}, description={description}"
-        )
-
         query = """
         MATCH (n:Entity)
         WHERE ($entity_type IS NULL OR n.entity_type = $entity_type)
@@ -257,6 +256,13 @@ class GraphDatabaseOperations:
           AND ($description IS NULL OR toLower(n.description) CONTAINS toLower($description))
         RETURN n
         """
+
+        logging.info(
+            "Querying entities with filters: "
+            f"entity_type={entity_type}, name={name}, description={description}"
+        )
+
+
         result = self.db_manager.execute_query(
             query, entity_type=entity_type, name=name, description=description
         )
@@ -268,6 +274,7 @@ class GraphDatabaseOperations:
     def query_relationships(
         self, source_type: str = None, rel_type: str = None, target_type: str = None
     ) -> List[Dict[str, str]]:
+
         query = """
         MATCH (a:Entity)-[r]->(b:Entity)
         WHERE ($source_type IS NULL OR a.entity_type = $source_type)
