@@ -13,7 +13,7 @@ from prompt_toolkit.formatted_text import HTML
 
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panelle
+from rich.panel import Panel
 
 from py2neo import Graph
 from dotenv import load_dotenv
@@ -442,6 +442,8 @@ class World:
 
     # CLI commands
 
+    from typing import List, Dict, Any
+
     def list_entities(
         self, type: str = None, name: str = None, description: str = None
     ) -> List[Dict[str, Any]]:
@@ -459,8 +461,11 @@ class World:
                 for k, v in all_properties.items()
                 if k not in ["name", "entity_type", "description"]
             }
+            # Ensure the order of keys in the detailed_entity dictionary
             detailed_entity = {
-                **core_properties,
+                "name": core_properties.get("name"),
+                "entity_type": core_properties.get("entity_type"),
+                "description": core_properties.get("description"),
                 "dynamic_properties": dynamic_properties,
             }
             detailed_entities.append(detailed_entity)
@@ -678,6 +683,7 @@ class CLI:
         self.aliases: Dict[str, str] = {}
         self.register_commands()
         self.setup_autocomplete()
+        self.console = Console()
 
     def setup_autocomplete(self):
         all_commands = list(self.commands.keys()) + list(self.aliases.keys())
@@ -753,13 +759,6 @@ class CLI:
 
         command = self.commands.get(command_name)
 
-        # if not command:
-        #    Check aliases if command is not found directly
-        #    for cmd in self.commands.values():
-        #       if command_name in cmd.aliases:
-        #            command = cmd
-        #            break
-
         if not command:
             logging.error(f"Unknown command: {command_name}")
             print(
@@ -817,7 +816,10 @@ class CLI:
         return parsed_args
 
     def run(self) -> None:
-        print("Enter your command or type 'help' for instructions or 'exit' to quit.")
+        self.console.print(
+            "Enter your command or type 'help' for instructions or 'exit' to quit.",
+            style="bold green",
+        )
         while True:
             try:
                 if self.use_prompt_toolkit:
@@ -836,19 +838,22 @@ class CLI:
                 self.execute_command(command_input)
             except EOFError:
                 break
-        print("\nThanks for using Worldbuilder")
+        self.console.print("\nThanks for using Worldbuilder", style="bold blue")
 
     def fallback_input(self, prompt_text):
         return input(prompt_text)
 
     def print_help(self) -> None:
-        print("Available commands:")
+        self.console.print("Available commands:", style="bold green")
         for name, command in self.commands.items():
             alias_str = (
                 f" (aliases: {', '.join(command.aliases)})" if command.aliases else ""
             )
-            print(f"  {name:<15} - {command.description}{alias_str}")
-        print("\nFor detailed help on a specific command, type <command_name> --help")
+            self.console.print(f"  {name:<15} - {command.description}{alias_str}")
+        self.console.print(
+            "\nFor detailed help on a specific command, type <command_name> --help",
+            style="italic",
+        )
 
     def print_command_help(self, command: Command) -> None:
         print(f"Command: {command.name}")
@@ -867,34 +872,67 @@ class CLI:
 
     def display_result(self, result: Any) -> None:
         if result is None:
-            print("Operation completed, but no results were returned.")
+            self.console.print(
+                "Operation completed, but no results were returned.", style="yellow"
+            )
         elif isinstance(result, str):
-            print(result)
+            self.console.print(result)
         elif isinstance(result, list):
             self.display_list_result(result)
         else:
-            print(str(result))
-        print("")
+            self.console.print(str(result))
+        self.console.print("")
 
     def display_list_result(self, result_list: List[Any]) -> None:
+        if not result_list:
+            self.console.print("No results to display.", style="yellow")
+            return
+
+        headers = []
         for item in result_list:
-            self.display_item_result(item)
-            print("")
+            if isinstance(item, dict):
+                headers = list(item.keys())
+                break
+
+        if not headers:
+            self.console.print("Unable to determine table structure.", style="yellow")
+            return
+
+        table = Table(show_header=True, header_style="bold magenta")
+        for header in headers:
+            table.add_column(header, style="dim", max_width=50)  # Limit column width
+
+        for item in result_list:
+            if isinstance(item, dict):
+                table.add_row(*[str(item.get(header, "")) for header in headers])
+            else:
+                table.add_row(str(item), *["" for _ in range(len(headers) - 1)])
+
+        self.console.print(table)
 
     def display_item_result(self, item: Any) -> None:
-        if isinstance(item, Dict) and "dynamic_properties" in item:
+        if isinstance(item, dict) and "dynamic_properties" in item:
             self.display_dict_result(item)
         else:
-            print(item)
+            self.console.print(item)
 
     def display_dict_result(self, item_dict: Dict[str, Any]) -> None:
-        print(f"Name: {item_dict.get('name')}")
-        print(f"Type: {item_dict.get('entity_type')}")
-        print(f"Description: {item_dict.get('description')}")
+        panel = Panel(
+            f"[bold]Name:[/bold] {item_dict.get('name')}\n"
+            f"[bold]Type:[/bold] {item_dict.get('entity_type')}\n"
+            f"[bold]Description:[/bold] {item_dict.get('description')}\n",
+            title="Entity Details",
+            expand=False,
+        )
+        self.console.print(panel)
+
         if item_dict["dynamic_properties"]:
-            print("Dynamic Properties:")
+            prop_table = Table(show_header=True, header_style="bold blue")
+            prop_table.add_column("Property", style="dim")
+            prop_table.add_column("Value", style="dim")
             for key, value in item_dict["dynamic_properties"].items():
-                print(f"  {key}: {value}")
+                prop_table.add_row(str(key), str(value))
+            self.console.print(prop_table)
 
     def register_commands(self) -> None:
         self.register_command(
