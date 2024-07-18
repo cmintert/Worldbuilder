@@ -442,7 +442,15 @@ class World:
 
     # CLI commands
 
-    from typing import List, Dict, Any
+    def get_entity_details(self, name: str) -> Dict[str, Any]:
+        entity = self.entities.get(name)
+        if not entity:
+            return None
+
+        details = entity.get_all_properties()
+        relationships = self.db_operations.read_relationships(name)
+        details["relationships"] = relationships
+        return details
 
     def list_entities(
         self, type: str = None, name: str = None, description: str = None
@@ -782,14 +790,16 @@ class CLI:
                     f"Executing command: {command_name} with arguments: {parsed_args}"
                 )
 
-            result = command.execute(
-                **parsed_args
-            )  # This is where the error might occur
+            if command_name == "view_entity":
+                result = command.execute(**parsed_args)
+                self.display_entity_details(result)
+            else:
+                result = command.execute(**parsed_args)
+                self.display_result(result)
 
             logging.info(f"Command execution result: {result}")
-
-            self.display_result(result)
             logging.info(f"Command executed successfully: {command_name}")
+
         except Exception as e:
             logging.error(
                 f"Error executing command '{command_name}' with args {parsed_args}: {e}"
@@ -934,6 +944,42 @@ class CLI:
                 prop_table.add_row(str(key), str(value))
             self.console.print(prop_table)
 
+    def display_entity_details(self, entity_details: Dict[str, Any]) -> None:
+        if not entity_details:
+            self.console.print("Entity not found.", style="bold red")
+            return
+
+        panel = Panel(
+            f"[bold]Name:[/bold] {entity_details.get('name')}\n"
+            f"[bold]Type:[/bold] {entity_details.get('entity_type')}\n"
+            f"[bold]Description:[/bold] {entity_details.get('description')}\n",
+            title="Entity Details",
+            expand=False,
+        )
+        self.console.print(panel)
+
+        prop_table = Table(show_header=True, header_style="bold blue")
+        prop_table.add_column("Property", style="dim")
+        prop_table.add_column("Value", style="dim")
+        for key, value in entity_details.items():
+            if key not in ["name", "entity_type", "description", "relationships"]:
+                prop_table.add_row(str(key), str(value))
+        self.console.print(prop_table)
+
+        # New code to handle relationships
+        if "relationships" in entity_details:
+            rel_table = Table(show_header=True, header_style="bold green")
+            rel_table.add_column("Relationship Type", style="dim")
+            rel_table.add_column("Target Entity", style="dim")
+            for rel in entity_details["relationships"]:
+                rel_type = rel[0][
+                    "original_type"
+                ]  # Adjust based on your data structure
+                target_name = rel[1]["name"]  # Adjust based on your data structure
+                rel_table.add_row(rel_type, target_name)
+            self.console.print("\nRelationships:", style="bold")
+            self.console.print(rel_table)
+
     def register_commands(self) -> None:
         self.register_command(
             "list_entities",
@@ -1039,6 +1085,16 @@ class CLI:
                 "property_name": {"help": "Name of the property to delete"},
             },
             aliases=["dp"],
+        )
+
+        self.register_command(
+            "view_entity",
+            "Display detailed information about an entity",
+            self.world.get_entity_details,
+            {
+                "name": {"help": "Name of the entity to view"},
+            },
+            aliases=["ve"],
         )
 
 
