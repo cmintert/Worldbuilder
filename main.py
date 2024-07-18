@@ -11,6 +11,10 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
 from prompt_toolkit.formatted_text import HTML
 
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panelle
+
 from py2neo import Graph
 from dotenv import load_dotenv
 from typing import Callable, Dict, List, Tuple, Any, Optional
@@ -25,9 +29,7 @@ class DatabaseManager:
             logging.error(f"Error connecting to the database: {e}")
             raise
 
-    def execute_query(
-        self, query: str, **params: Any
-    ) -> List[Dict[str, Any]]:
+    def execute_query(self, query: str, **params: Any) -> List[Dict[str, Any]]:
         logging.info(f"Executing query: {query.strip()}")
         try:
             result = self.graph.run(query, **params).data()
@@ -58,7 +60,7 @@ class GraphDatabaseOperations:
 
     # Entity Operations
 
-    def create_entity(self, entity: "Entity") -> Optional[Dict[str, Any]]:
+    def create_entity(self, entity: Entity) -> Optional[Dict[str, Any]]:
         query = """
         CREATE (n:Entity $properties)
         RETURN n
@@ -80,7 +82,7 @@ class GraphDatabaseOperations:
             logging.error(f"Error during entity creation: {e}")
             raise
 
-    def bulk_create_entities(self, entities: List["Entity"]) -> None:
+    def bulk_create_entities(self, entities: List[Entity]) -> None:
 
         query = """
         UNWIND $entities AS entity
@@ -184,7 +186,7 @@ class GraphDatabaseOperations:
         )
         return result[0]["r"] if result else None
 
-    def bulk_create_relationships(self, relationships: List[Dict[str, Any]]) -> None:
+    def bulk_create_relationships(self, relationships: List[Relationship]) -> None:
         logging.info(f"Starting bulk creation of {len(relationships)} relationships.")
 
         # Group relationships by sanitized type
@@ -693,7 +695,7 @@ class CLI:
         self,
         name: str,
         description: str,
-        execute: Callable,
+        execute: Callable[..., Any],
         arguments: Dict[str, Dict[str, str]] = None,
         aliases: List[str] = None,
     ):
