@@ -14,6 +14,7 @@ from prompt_toolkit.formatted_text import HTML
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.tree import Tree
 
 from py2neo import Graph
 from dotenv import load_dotenv
@@ -483,6 +484,46 @@ class World:
             else "No entities found matching the criteria."
         )
 
+    def get_entity_graph(self, name: str, depth: str = "3") -> Dict[str, Any]:
+        entity = self.entities.get(name)
+
+        if not entity:
+            return None
+
+        # Passing depth from a prompt returns a string, we need to convert it to an integer
+        if depth.isdigit():
+            self.depth: int = int(depth)
+        else:
+            raise ValueError("Depth should be a positive number")
+
+        graph = {
+            "name": entity.name,
+            "type": entity.entity_type,
+            "relationships": self._get_relationships_recursive(entity.name, self.depth),
+        }
+        return graph
+
+    def _get_relationships_recursive(
+        self, entity_name: str, depth: int = 2
+    ) -> List[Dict[str, Any]]:
+
+        if depth == 0:
+            return []
+
+        relationships = self.db_operations.read_relationships(entity_name)
+        result = []
+
+        for rel, target in relationships:
+            target_entity = {
+                "name": target["name"],
+                "type": target["entity_type"],
+                "relationships": self._get_relationships_recursive(
+                    target["name"], depth - 1
+                ),
+            }
+            result.append({"type": rel["original_type"], "target": target_entity})
+        return result
+
     def list_relationships(
         self, source_type: str = None, rel_type: str = None, target_type: str = None
     ) -> List[Dict[str, Any]]:
@@ -513,9 +554,9 @@ class World:
         return created_relationship
 
     def add_entity(
-        self, entity_type: str, name: str, description: str
+        self, entity_type: str, name: str, description: str, properties: Any
     ) -> Dict[str, Any]:
-        entity = Entity(name, entity_type, description)
+        entity = Entity(name, entity_type, description, **properties)
         logging.info(f"Creating entity: {entity}")
         created_entity = self.db_operations.create_entity(entity)
         if created_entity:
@@ -793,6 +834,10 @@ class CLI:
             if command_name == "view_entity":
                 result = command.execute(**parsed_args)
                 self.display_entity_details(result)
+            elif command_name == "view_graph":
+                result = command.execute(**parsed_args)
+                depth = min(int(parsed_args.get("depth", 3)), 5)  # Limit max depth to 5
+                self.display_entity_graph(result, max_depth=depth)
             else:
                 result = command.execute(**parsed_args)
                 self.display_result(result)
@@ -806,16 +851,23 @@ class CLI:
             )
             print(f"Error executing command in execute_command method: {e}")
 
-    def parse_arguments(self, args: List[str]) -> Dict[str, str]:
+    def parse_arguments(self, args: List[str]) -> Dict[str, Any]:
         parsed_args = {}
         i = 0
         while i < len(args):
             if args[i].startswith("--"):
                 arg_name = args[i][2:]
-                if i + 1 < len(args):
+                if arg_name == "properties":
+                    properties = {}
+                    i += 1
+                    while i < len(args) and not args[i].startswith("--"):
+                        key, value = args[i].split("=")
+                        properties[key] = value
+                        i += 1
+                    parsed_args["properties"] = properties
+                elif i + 1 < len(args):
                     arg_value = args[i + 1]
                     parsed_args[arg_name] = arg_value
-                    logging.info(f"Parsed argument: {arg_name} -> {arg_value}")
                     i += 2
                 else:
                     logging.error(f"No value provided for argument {args[i]}")
@@ -980,6 +1032,37 @@ class CLI:
             self.console.print("\nRelationships:", style="bold")
             self.console.print(rel_table)
 
+    def display_entity_graph(self, graph: Dict[str, Any], max_depth: int = 3) -> None:
+        if not graph:
+            self.console.print("Entity not found.", style="bold red")
+            return
+
+        tree = Tree(f"[bold]{graph['name']}[/bold] ({graph['type']})")
+        self._add_relationships_to_tree(
+            tree, graph.get("relationships", []), current_depth=1, max_depth=max_depth
+        )
+        self.console.print(tree)
+
+    def _add_relationships_to_tree(
+        self,
+        tree: Tree,
+        relationships: List[Dict[str, Any]],
+        current_depth: int,
+        max_depth: int,
+    ) -> None:
+        if current_depth > max_depth:
+            return
+
+        for rel in relationships:
+            rel_description = f"[italic]{rel['type']}[/italic] → [bold]{rel['target']['name']}[/bold] ({rel['target']['type']})"
+            child = tree.add(rel_description)
+            self._add_relationships_to_tree(
+                child,
+                rel["target"].get("relationships", []),
+                current_depth + 1,
+                max_depth,
+            )
+
     def register_commands(self) -> None:
         self.register_command(
             "list_entities",
@@ -1019,6 +1102,9 @@ class CLI:
                 },
                 "name": {"help": "Name of the entity to add"},
                 "description": {"help": "Description of the entity to add"},
+                "properties": {
+                    "help": "Additional properties for the entity (optional)"
+                },
             },
             aliases=["ae"],
         )
@@ -1097,6 +1183,19 @@ class CLI:
             aliases=["ve"],
         )
 
+        self.register_command(
+            "view_graph",
+            "Display a graph of entity relationships",
+            self.world.get_entity_graph,
+            {
+                "name": {"help": "Name of the entity to start the graph from"},
+                "depth": {
+                    "help": "Depth of the relationship graph (default: 3, max: 5)"
+                },
+            },
+            aliases=["vg"],
+        )
+
 
 def main() -> None:
     logging.basicConfig(
@@ -1117,7 +1216,7 @@ def main() -> None:
     my_world = World(db_uri, db_user, db_password)
     my_world.clear_graph()
 
-    data_path = "data/world_data.json"
+    data_path = "data/world_data_v3.json"
     my_world.load_data(data_path)
     print(my_world)
 
