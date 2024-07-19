@@ -4,12 +4,14 @@ import os
 import logging
 import shlex
 import json
-
+import re
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import NestedCompleter
+
 
 from rich.console import Console
 from rich.table import Table
@@ -554,8 +556,16 @@ class World:
         return created_relationship
 
     def add_entity(
-        self, entity_type: str, name: str, description: str, properties: Any
+        self,
+        entity_type: str,
+        name: str,
+        description: str,
+        properties: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+
+        if properties is None:
+            properties = {}
+
         entity = Entity(name, entity_type, description, **properties)
         logging.info(f"Creating entity: {entity}")
         created_entity = self.db_operations.create_entity(entity)
@@ -721,6 +731,88 @@ class Command:
         return f"{self.name}, {self.description}, {self.execute}, {self.arguments}, Aliases: {self.aliases}"
 
 
+class CustomCompleter(Completer):
+    def __init__(self, cli):
+        self.cli = cli
+
+    def has_unmatched_quotes(self, text):
+        # Check if there are unmatched quotes in the text
+        return text.count('"') % 2 != 0 or text.count("'") % 2 != 0
+
+    def get_completions(self, document, complete_event):
+        word_before_cursor = document.get_word_before_cursor(WORD=True)
+        text_before_cursor = document.text_before_cursor
+
+        words = self.split_input(text_before_cursor)
+        if self.is_suggesting_commands(words, text_before_cursor):
+            yield from self.suggest_commands_and_aliases(word_before_cursor)
+        elif self.is_command_entered(words, text_before_cursor):
+            return
+        elif self.is_typing_arguments(words):
+            yield from self.suggest_command_arguments(words, word_before_cursor)
+
+    def split_input(self, text_before_cursor):
+        if self.has_unmatched_quotes(text_before_cursor):
+            words = text_before_cursor.split()
+            logging.debug(f"Detected unmatched quotes, words: {words}")
+        else:
+            try:
+                words = shlex.split(text_before_cursor)
+                logging.debug(f"Using shlex.split, words: {words}")
+            except ValueError:
+                words = text_before_cursor.split()
+                logging.debug(f"Fallback to simple split, words: {words}")
+        return words
+
+    def is_suggesting_commands(self, words, text_before_cursor):
+        return len(words) == 0 or (
+            len(words) == 1 and not text_before_cursor.endswith(" ")
+        )
+
+    def suggest_commands_and_aliases(self, word_before_cursor):
+        logging.debug("Suggesting commands and aliases")
+        for command in self.cli.commands:
+            if command.startswith(word_before_cursor):
+                logging.debug(f"Suggesting command: {command}")
+                yield Completion(command, start_position=-len(word_before_cursor))
+        for alias in self.cli.aliases:
+            if alias.startswith(word_before_cursor):
+                logging.debug(f"Suggesting alias: {alias}")
+                yield Completion(alias, start_position=-len(word_before_cursor))
+
+    def is_command_entered(self, words, text_before_cursor):
+        return len(words) == 1 and text_before_cursor.endswith(" ")
+
+    def is_typing_arguments(self, words):
+        return len(words) >= 1
+
+    def suggest_command_arguments(self, words, word_before_cursor):
+        command_name = words[0]
+
+        if command_name in self.cli.aliases:
+            command_name = self.cli.aliases[command_name]
+
+        if command_name in self.cli.commands:
+
+            existing_args = {
+                arg.split("=")[0] for arg in words[1:] if arg.startswith("--")
+            }
+            if not word_before_cursor.startswith("--") and any(
+                word.startswith("--") for word in words
+            ):
+                # If the word before the cursor is not an argument and any word in the input is an argument,
+                # it means we are typing the value of an argument, so do not suggest new arguments.
+                return
+            for arg in self.cli.commands[command_name].arguments:
+                if (
+                    f"--{arg}".startswith(word_before_cursor)
+                    and f"--{arg}" not in existing_args
+                ):
+                    yield Completion(
+                        f"--{arg}", start_position=-len(word_before_cursor)
+                    )
+
+
 class CLI:
 
     def __init__(self, world) -> None:
@@ -735,16 +827,24 @@ class CLI:
         self.console = Console()
 
     def setup_autocomplete(self):
-        all_commands = list(self.commands.keys()) + list(self.aliases.keys())
-        self.completer = WordCompleter(all_commands, ignore_case=True)
+        completer = CustomCompleter(self)
         try:
-            self.session = PromptSession(completer=self.completer)
+            self.session = PromptSession(completer=completer)
             self.use_prompt_toolkit = True
         except NoConsoleScreenBufferError:
             self.use_prompt_toolkit = False
             print(
                 "Advanced console features not available. Falling back to basic input."
             )
+
+    def create_nested_completer(self):
+        command_dict = {}
+        for name, command in self.commands.items():
+            arg_dict = {f"--{arg}": None for arg in command.arguments.keys()}
+            command_dict[name] = arg_dict
+        for alias, command_name in self.aliases.items():
+            command_dict[alias] = command_dict[command_name]
+        return NestedCompleter.from_nested_dict(command_dict)
 
     def register_command(
         self,
@@ -877,7 +977,7 @@ class CLI:
                 raise ValueError(f"Invalid argument format: {args[i]}")
         return parsed_args
 
-    def run(self) -> None:
+    def run(self):
         self.console.print(
             "Enter your command or type 'help' for instructions or 'exit' to quit.",
             style="bold green",
@@ -886,8 +986,7 @@ class CLI:
             try:
                 if self.use_prompt_toolkit:
                     command_input = self.session.prompt(
-                        HTML("<ansiyellow>Command></ansiyellow> "),
-                        completer=self.completer,
+                        HTML("<ansiyellow>Command></ansiyellow> ")
                     ).strip()
                 else:
                     command_input = self.fallback_input("Command> ").strip()
@@ -1214,7 +1313,8 @@ def main() -> None:
     db_password = os.getenv("DB_PASSWORD")
 
     my_world = World(db_uri, db_user, db_password)
-    my_world.clear_graph()
+    # exit
+    # my_world.clear_graph()
 
     data_path = "data/world_data_v3.json"
     my_world.load_data(data_path)
