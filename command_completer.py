@@ -86,3 +86,4 @@ class CommandCompleter(Completer):
                     yield Completion(
                         f"--{arg}", start_position=-len(word_before_cursor)
                     )
+

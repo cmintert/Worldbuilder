@@ -360,6 +360,26 @@ class World:
             return f"Property '{property_name}' deleted from entity '{name}'."
         return f"Failed to delete property '{property_name}' from entity '{name}'."
 
+    def create_rel_type_catalogue(self):
+
+        rel_types = []
+        for entity in self.entities.values():
+            for rel in entity.relationships:
+                rel_types.append(rel.rel_type)
+        return list(set(rel_types))
+
+    def create_entity_type_catalogue(self):
+
+        entity_types = []
+        for entity in self.entities.values():
+            entity_types.append(entity.entity_type)
+        return list(set(entity_types))
+
+    def create_entity_name_catalogue(self):
+
+        return list(self.entities.keys())
+
+
 
 class Command:
     def __init__(
