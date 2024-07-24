@@ -380,7 +380,6 @@ class World:
         return list(self.entities.keys())
 
 
-
 class Command:
     def __init__(
         self,
