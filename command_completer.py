@@ -14,18 +14,6 @@ class CommandCompleter(Completer):
         # Check if there are unmatched quotes in the text
         return text.count('"') % 2 != 0 or text.count("'") % 2 != 0
 
-    def get_completions(self, document, complete_event):
-        word_before_cursor = document.get_word_before_cursor(WORD=True)
-        text_before_cursor = document.text_before_cursor
-
-        words = self.split_input(text_before_cursor)
-        if self.is_suggesting_commands(words, text_before_cursor):
-            yield from self.suggest_commands_and_aliases(word_before_cursor)
-        elif self.is_command_entered(words, text_before_cursor):
-            return
-        elif self.is_typing_arguments(words):
-            yield from self.suggest_command_arguments(words, word_before_cursor)
-
     def split_input(self, text_before_cursor):
         if self.has_unmatched_quotes(text_before_cursor):
             words = text_before_cursor.split()
@@ -86,3 +74,35 @@ class CommandCompleter(Completer):
                     yield Completion(
                         f"--{arg}", start_position=-len(word_before_cursor)
                     )
+
+    def suggest_name_of_entity(self, word_before_cursor):
+        for entity_name in self.cli.world.create_entity_name_catalogue():
+            if entity_name.lower().startswith(word_before_cursor.lower()):
+                suggestion = self.quote_if_needed(entity_name)
+                yield Completion(suggestion, start_position=-len(word_before_cursor))
+
+    def suggest_relationship_types(self, word_before_cursor):
+        for rel_type in self.cli.world.create_rel_type_catalogue():
+            if rel_type.lower().startswith(word_before_cursor.lower()):
+                # suggestion needs to be upper case and blanks replaced by underscores
+                suggestion = rel_type.upper().replace(" ", "_")
+                yield Completion(suggestion, start_position=-len(word_before_cursor))
+
+    def suggest_entity_types(self, word_before_cursor):
+        for entity_type in self.cli.world.create_entity_type_catalogue():
+            if entity_type.lower().startswith(word_before_cursor.lower()):
+                suggestion = self.quote_if_needed(entity_type)
+                yield Completion(suggestion, start_position=-len(word_before_cursor))
+
+    def quote_if_needed(self, value):
+        if " " in value:
+            return f'"{value}"'
+        return value
+
+    def suggest_argument_values(self, arg, word_before_cursor):
+        if arg in ["name", "source", "target"]:
+            yield from self.suggest_name_of_entity(word_before_cursor)
+        elif arg in ["rel_type"]:
+            yield from self.suggest_relationship_types(word_before_cursor)
+        elif arg in ["entity_type", "type"]:
+            yield from self.suggest_entity_types(word_before_cursor)
