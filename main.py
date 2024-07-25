@@ -33,7 +33,6 @@ class World:
         self.entities = {}
 
     def load_data(self, file_path: str) -> None:
-        logging.info(f"Loading data from {file_path}")
         with open(file_path, "r") as file:
             data = json.load(file)
 
@@ -50,8 +49,6 @@ class World:
 
             logging.info(f"Entity parsed: {entity}")
             self.entities[entity.name] = entity
-
-        logging.info(f"Entities created: {self.entities.keys()}")
 
     def populate_graph(self) -> None:
         logging.info("Populating graph...")
@@ -758,6 +755,8 @@ def main() -> None:
         filemode="w",
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    logging.getLogger("py2neo").setLevel(logging.WARNING)
 
     logging.info("---------------------------Application started")
 

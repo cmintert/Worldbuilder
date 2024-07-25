@@ -13,7 +13,7 @@ def is_neo4j_running(host="localhost", port=7687):
 
 
 neo4j_bin_path = os.getenv("NEO4J_BIN_PATH", "D:\neo4j-community-4.4.34\bin")
-start_command = os.path.join(neo4j_bin_path, "neo4j") + " start"
+start_command = os.path.join(neo4j_bin_path, "./neo4j") + " console"
 
 if is_neo4j_running():
     print("Neo4j is already running.")
