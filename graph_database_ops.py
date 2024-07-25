@@ -225,7 +225,7 @@ class GraphDatabaseOperations:
         RETURN n
         """
 
-        logging.info(
+        exitg.info(
             "Querying entities with filters: "
             f"entity_type={entity_type}, name={name}, description={description}"
         )
