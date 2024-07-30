@@ -4,7 +4,7 @@
     "type": "Kingdom",
     "description": "A prosperous kingdom known for its rich culture and advanced magic.",
     "relationships": [
-      {"type": "contains", "target": "Silverlake"},
+      {"type": "contains", "target": "Silverlake", "since": "founding"},
       {"type": "ruled by", "target": "Eldor"},
       {"type": "protected by", "target": "Alara"},
       {"type": "threatened by", "target": "Drakonis"},

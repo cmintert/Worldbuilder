@@ -1,787 +1,579 @@
-from __future__ import annotations
-
 import os
 import logging
-import shlex
-import json
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.output.win32 import NoConsoleScreenBufferError
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.completion import NestedCompleter
+import shortuuid
+import re
 
-
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.tree import Tree
-
+from typing import Dict, Any, List
 from dotenv import load_dotenv
-from typing import Callable, Dict, List, Tuple, Any, Optional
+from py2neo import Graph
 
-from command_completer import CommandCompleter
-from data_classes import Entity
-from database_manager import DatabaseManager
-from graph_database_ops import GraphDatabaseOperations
-from worldbuilder_commands import register_commands
+# logg only for main.py
 
-
-class World:
-    def __init__(self, db_uri: str, db_user: str, db_password: str) -> None:
-        self.db_manager = DatabaseManager(db_uri, db_user, db_password)
-        self.db_operations = GraphDatabaseOperations(self.db_manager)
-        self.entities = {}
-
-    def load_data(self, file_path: str) -> None:
-        with open(file_path, "r") as file:
-            data = json.load(file)
-
-        for item in data:
-            entity = Entity(item["name"], item["type"], item["description"])
-
-            # Add relationships
-            for relationship in item.get("relationships", []):
-                entity.add_relationship(relationship["type"], relationship["target"])
-
-            # Add all properties
-            for prop, value in item.get("properties", {}).items():
-                entity.set_property(prop, value)
-
-            logging.info(f"Entity parsed: {entity}")
-            self.entities[entity.name] = entity
-
-    def populate_graph(self) -> None:
-        logging.info("Populating graph...")
-        try:
-            # Create or update entities
-            self.db_operations.bulk_create_entities(self.entities.values())
-            logging.info("Entities created/updated in the graph.")
-
-            # Prepare relationships
-            all_relationships = [
-                {
-                    "source": relationship.source.name,
-                    "target": relationship.target,
-                    "type": relationship.rel_type,
-                }
-                for entity in self.entities.values()
-                for relationship in entity.relationships
-            ]
-
-            if not all_relationships:
-                logging.info("No relationships to create.")
-            else:
-                logging.info(
-                    f"Attempting to create {len(all_relationships)} relationships."
-                )
-                self.db_operations.bulk_create_relationships(all_relationships)
-                logging.info("Relationships created in the graph.")
-        except Exception as e:
-            logging.error(f"Error populating graph: {e}")
-            raise
-
-    def query_graph(self, query: str, **params: Any) -> List[Dict[str, Any]]:
-        return self.db_operations.db_manager.execute_query(query, **params)
-
-    def clear_graph(self) -> None:
-        self.db_operations.clear_graph()
-
-    def __repr__(self) -> str:
-        return f"World with {len(self.entities)} entities"
-
-    # CLI commands
-
-    def get_entity_details(self, name: str) -> Dict[str, Any]:
-        entity = self.entities.get(name)
-        if not entity:
-            return None
-
-        details = entity.get_all_properties()
-        relationships = self.db_operations.read_relationships(name)
-        details["relationships"] = relationships
-        return details
-
-    def list_entities(
-        self, type: str = None, name: str = None, description: str = None
-    ) -> List[Dict[str, Any]]:
-        entities = self.db_operations.query_entities(type, name, description)
-        detailed_entities = []
-        for entity in entities:
-            all_properties = self.db_operations.get_entity_properties(entity["name"])
-            core_properties = {
-                k: v
-                for k, v in all_properties.items()
-                if k in ["name", "entity_type", "description"]
-            }
-            dynamic_properties = {
-                k: v
-                for k, v in all_properties.items()
-                if k not in ["name", "entity_type", "description"]
-            }
-            # Ensure the order of keys in the detailed_entity dictionary
-            detailed_entity = {
-                "name": core_properties.get("name"),
-                "entity_type": core_properties.get("entity_type"),
-                "description": core_properties.get("description"),
-                "dynamic_properties": dynamic_properties,
-            }
-            detailed_entities.append(detailed_entity)
-        return (
-            detailed_entities
-            if detailed_entities
-            else "No entities found matching the criteria."
-        )
-
-    def get_entity_graph(self, name: str, depth: str = "3") -> Dict[str, Any]:
-        entity = self.entities.get(name)
-
-        if not entity:
-            return None
-
-        # Passing depth from a prompt returns a string, we need to convert it to an integer
-        if depth.isdigit():
-            self.depth: int = int(depth)
-        else:
-            raise ValueError("Depth should be a positive number")
-
-        graph = {
-            "name": entity.name,
-            "type": entity.entity_type,
-            "relationships": self._get_relationships_recursive(entity.name, self.depth),
-        }
-        return graph
-
-    def _get_relationships_recursive(
-        self, entity_name: str, depth: int = 2
-    ) -> List[Dict[str, Any]]:
-
-        if depth == 0:
-            return []
-
-        relationships = self.db_operations.read_relationships(entity_name)
-        result = []
-
-        for rel, target in relationships:
-            target_entity = {
-                "name": target["name"],
-                "type": target["entity_type"],
-                "relationships": self._get_relationships_recursive(
-                    target["name"], depth - 1
-                ),
-            }
-            result.append({"type": rel["original_type"], "target": target_entity})
-        return result
-
-    def list_relationships(
-        self, source_type: str = None, rel_type: str = None, target_type: str = None
-    ) -> List[Dict[str, Any]]:
-        relationships = self.db_operations.query_relationships(
-            source_type, rel_type, target_type
-        )
-        return relationships
-
-    def add_relationship(
-        self, source: str, rel_type: str, target: str, properties: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
-        source_entity = self.entities.get(source)
-        target_entity = self.entities.get(target)
-        if not source_entity:
-            logging.error(f"Source entity '{source}' does not exist.")
-            raise ValueError(f"Source entity '{source}' does not exist.")
-        if not target_entity:
-            logging.error(f"Target entity '{target}' does not exist.")
-            raise ValueError(f"Target entity '{target}' does not exist.")
-        created_relationship = self.db_operations.create_relationship(
-            source, rel_type, target, properties
-        )
-        if created_relationship:
-            source_entity.add_relationship(rel_type, target_entity, **properties or {})
-            logging.info(
-                f"Relationship '{rel_type}' added between '{source}' and '{target}'."
-            )
-        return created_relationship
-
-    def add_entity(
-        self,
-        entity_type: str,
-        name: str,
-        description: str,
-        properties: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-
-        if properties is None:
-            properties = {}
-
-        entity = Entity(name, entity_type, description, **properties)
-        logging.info(f"Creating entity: {entity}")
-        created_entity = self.db_operations.create_entity(entity)
-        if created_entity:
-            self.entities[name] = entity
-            logging.info(f"Entity added to internal Dictionary: {self.entities[name]}")
-        else:
-            logging.error(f"Failed to create entity: {entity}")
-        return dict(created_entity) if created_entity else None
-
-    def modify_entity(
-        self,
-        name: str,
-        new_name: str = None,
-        entity_type: str = None,
-        description: str = None,
-    ) -> Dict[str, Any]:
-        logging.info(
-            f"Starting modify_entity for name: {name} with new_name: {new_name}, entity_type: {entity_type}, description: {description}"
-        )
-
-        updated_properties = self.get_updated_properties(
-            new_name, entity_type, description
-        )
-        logging.info(f"Updated properties to be applied: {updated_properties}")
-
-        updated_entity = self.update_entity_in_db(name, updated_properties)
-
-        if updated_entity:
-            self.update_entity_in_memory(name, new_name, updated_properties)
-
-        return dict(updated_entity) if updated_entity else None
-
-    def get_updated_properties(
-        self, new_name: str, entity_type: str, description: str
-    ) -> Dict[str, Any]:
-        updated_properties = {}
-        if new_name:
-            updated_properties["name"] = new_name
-        if entity_type:
-            updated_properties["entity_type"] = entity_type
-        if description:
-            updated_properties["description"] = description
-        return updated_properties
-
-    def update_entity_in_db(
-        self, name: str, updated_properties: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        if not hasattr(self.db_operations, "update_entity"):
-            logging.error("db_operations object does not have update_entity method.")
-            raise AttributeError(
-                "update_entity method is not defined in db_operations."
-            )
-
-        try:
-            updated_entity = self.db_operations.update_entity(name, updated_properties)
-            logging.info(f"Update entity result: {updated_entity}")
-        except Exception as e:
-            logging.error(
-                f"Error updating entity in database for name: {name} with updated_properties: {updated_properties}: {e}"
-            )
-            raise
-        return updated_entity
-
-    def update_entity_in_memory(
-        self, name: str, new_name: str, updated_properties: dict[str, Any]
-    ) -> None:
-        try:
-            if new_name:
-                self.entities[new_name] = self.entities.pop(name, None)
-                logging.info(
-                    f"Updated internal entities dictionary: renamed {name} to {new_name}"
-                )
-        except Exception as e:
-            logging.error(
-                f"Error updating internal dictionary for renaming {name} to {new_name}: {e}"
-            )
-            raise
-
-        try:
-            if name in self.entities and self.entities[name]:
-                logging.info(f"Entity before update: {self.entities[name]}")
-                self.entities[name].__dict__.update(updated_properties)
-                logging.info(
-                    f"Updated properties in internal entities dictionary for {name}: {self.entities[name]}"
-                )
-        except Exception as e:
-            logging.error(
-                f"Error updating properties in internal entities dictionary for {name}: {e}"
-            )
-            raise
-
-    def add_property(self, name: str, property_name: str, property_value: Any) -> str:
-        entity = self.entities.get(name)
-        if not entity:
-            return f"Entity '{name}' not found."
-
-        entity.set_property(property_name, property_value)
-        updated_entity = self.db_operations.update_entity(
-            name, {property_name: property_value}
-        )
-
-        if updated_entity:
-            return f"Property '{property_name}' added to entity '{name}'."
-        return f"Failed to add property '{property_name}' to entity '{name}'."
-
-    def modify_property(self, name: str, property_name: str, new_value: Any) -> str:
-        entity = self.entities.get(name)
-        if not entity:
-            return f"Entity '{name}' not found."
-
-        if property_name not in entity.get_all_properties():
-            return f"Property '{property_name}' does not exist for entity '{name}'."
-
-        entity.set_property(property_name, new_value)
-        updated_entity = self.db_operations.update_entity(
-            name, {property_name: new_value}
-        )
-
-        if updated_entity:
-            return f"Property '{property_name}' of entity '{name}' updated to '{new_value}'."
-        return f"Failed to update property '{property_name}' of entity '{name}'."
-
-    def delete_property(self, name: str, property_name: str) -> str:
-        entity = self.entities.get(name)
-        if not entity:
-            return f"Entity '{name}' not found."
-
-        if property_name not in entity.get_all_properties():
-            return f"Property '{property_name}' does not exist for entity '{name}'."
-
-        # Don't allow deletion of core properties
-        if property_name in ["name", "entity_type", "description"]:
-            return f"Cannot delete core property '{property_name}'."
-
-        entity.delete_property(property_name)
-
-        # Update the entity in the database
-        updated_properties = entity.get_all_properties()
-        updated_entity = self.db_operations.update_entity(name, updated_properties)
-
-        if updated_entity:
-            return f"Property '{property_name}' deleted from entity '{name}'."
-        return f"Failed to delete property '{property_name}' from entity '{name}'."
-
-    def create_rel_type_catalogue(self):
-
-        rel_types = []
-        for entity in self.entities.values():
-            for rel in entity.relationships:
-                rel_types.append(rel.rel_type)
-        return list(set(rel_types))
-
-    def create_entity_type_catalogue(self):
-
-        entity_types = []
-        for entity in self.entities.values():
-            entity_types.append(entity.entity_type)
-        return list(set(entity_types))
-
-    def create_entity_name_catalogue(self):
-
-        return list(self.entities.keys())
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s",
+    filename="main.log",
+    filemode="w",
+)
+logger = logging.getLogger(__name__)
 
 
-class Command:
+class NodeNotFoundError(Exception):
+    def __init__(self, node):
+        message = f"The node '{node}' was not found in the graph."
+        super(NodeNotFoundError, self).__init__(message)
+
+
+class SameNodeError(Exception):
+    def __init__(self):
+        message = "The start node and end node cannot be the same in a relationship."
+        super(SameNodeError, self).__init__(message)
+
+
+class NodeIdNotFoundError(Exception):
+    def __init__(self, node_name):
+        message = f"The node ID for '{node_name}' was not found."
+        super(NodeIdNotFoundError, self).__init__(message)
+
+
+class InsufficientNodesError(Exception):
+    def __init__(self):
+        message = "Insufficient information to delete a relationship (Provide ID or Start and End Node)."
+        super(InsufficientNodesError, self).__init__(message)
+
+
+class RelationshipNotFoundError(Exception):
+    def __init__(self):
+        message = "The Relationship was not found in the graph."
+        super(RelationshipNotFoundError, self).__init__(message)
+
+
+class DuplicateNodeNameError(Exception):
+    def __init__(self, name):
+        message = f"A node with the name '{name}' already exists."
+        super(DuplicateNodeNameError, self).__init__(message)
+
+
+class Node:
     def __init__(
         self,
         name: str,
-        description: str,
-        execute: Callable,
-        arguments: Dict[str, Dict[str, str]] = None,
-        aliases: List[str] = None,
+        primary_label: str,
+        properties: Dict[Any, Any] = None,
     ):
+
+        # name and primary_label are required
+
         self.name = name
-        self.description = description
-        self.execute = execute
-        self.arguments = arguments or {}
-        self.aliases = aliases or []
+        self.labels = [primary_label]
+        self.properties = properties or {}
+        self.node_id = f"n_{shortuuid.uuid()[:6]}"
 
-    def __str__(self) -> str:
-        return f"{self.name}, {self.description}, {self.execute}, {self.arguments}, Aliases: {self.aliases}"
+    def __eq__(self, other):
+        if isinstance(other, Node):
+            return self.node_id == other.node_id
+        return NotImplemented
+
+    def modify_name(self, new_name: str):
+
+        # Ensure the name is modified only if it is different from the current name
+
+        if new_name != self.name:
+            self.name = new_name
+
+    def add_label(self, label: str):
+
+        # Ensure the label is added only if it does not exist
+
+        if label not in self.labels:
+            self.labels.append(label)
+
+    def modify_label(self, old_label: str, new_label: str):
+
+        # Ensure the label is modified only if it exists
+
+        if old_label in self.labels:
+            self.labels[self.labels.index(old_label)] = new_label
+
+    def delete_label(self, label: str):
+
+        # Ensure the label is deleted only if it exists, and it is not the primary label
+
+        if label in self.labels and label != self.labels[0]:
+            self.labels.remove(label)
+
+    def add_property(self, key: Any, value: Any):
+
+        # Ensure the property is added only if it does not exist
+
+        if key not in self.properties:
+            self.properties[key] = value
+
+    def modify_property(self, key: Any, value: Any):
+
+        # Ensure the property is modified only if it exists
+
+        if key in self.properties:
+            self.properties[key] = value
+
+    def delete_property(self, key: Any):
+
+        # Ensure the property is deleted only if it exists
+
+        if key in self.properties:
+            del self.properties[key]
 
 
-class CLI:
-
-    def __init__(self, world) -> None:
-        self.completer = None
-        self.session = None
-        self.use_prompt_toolkit = False
-        self.world = world
-        self.commands: Dict[str, Command] = {}
-        self.aliases: Dict[str, str] = {}
-
-        self.setup_autocomplete()
-        self.console = Console()
-
-        register_commands(self)
-
-    def setup_autocomplete(self):
-        completer = CommandCompleter(self)
-        try:
-            self.session = PromptSession(completer=completer)
-            self.use_prompt_toolkit = True
-        except NoConsoleScreenBufferError:
-            self.use_prompt_toolkit = False
-            print(
-                "Advanced console features not available. Falling back to basic input."
-            )
-
-    def create_nested_completer(self):
-        command_dict = {}
-        for name, command in self.commands.items():
-            arg_dict = {f"--{arg}": None for arg in command.arguments.keys()}
-            command_dict[name] = arg_dict
-        for alias, command_name in self.aliases.items():
-            command_dict[alias] = command_dict[command_name]
-        return NestedCompleter.from_nested_dict(command_dict)
-
-    def register_command(
+class Relationship:
+    def __init__(
         self,
-        name: str,
-        description: str,
-        execute: Callable[..., Any],
-        arguments: Dict[str, Dict[str, str]] = None,
-        aliases: List[str] = None,
+        start_node: str,
+        rel_type: str,
+        end_node: str,
+        properties: Dict[Any, Any] = None,
     ):
-        arguments = arguments or {}
-        aliases = aliases or []
-        new_command = Command(name, description, execute, arguments, aliases)
-        self.commands[name] = new_command
-        for alias in aliases:
-            self.aliases[alias] = name
-        logging.info(f"Command registered: {new_command}")
 
-    def validate_argument_exists(self, arg_name: str, command_name: str) -> bool:
-        if arg_name not in self.commands[command_name].arguments:
-            logging.error(f"Invalid argument for command {command_name}: {arg_name}")
-            return False
-        return True
+        # start_node_identifier, rel_type and end_node_identifier are required
 
-    def split_command_input(self, command_input: str) -> Tuple[str, List[str]]:
-        # Normalize the command input to ensure consistent parsing
-        command_input = command_input.strip()
+        # ensure the relationship type is in uppercase and blanks are replaced by underscores
+        # requirement of neo4j
 
-        # Attempt to split the command input into command and argument parts
+        rel_type = rel_type.upper().replace(" ", "_")
+
+        # strings for start_node_identifier and end_note have to be in the format "n_{shortuuid.uuid()[:6]}"
+
+        self.start_node = start_node
+        self.type = rel_type
+        self.end_node = end_node
+        self.relationship_id = f"r_{shortuuid.uuid()[:6]}"
+        self.properties = properties or {}
+
+    def __str__(self):
+        return f"{self.start_node} -> {self.type} -> {self.end_node}    ID: {self.relationship_id}"
+
+    def __eq__(self, other):
+        if isinstance(other, Relationship):
+            return self.relationship_id == other.relationship_id
+        return NotImplemented
+
+    def add_property(self, key: Any, value: Any):
+
+        # Ensure the property is added only if it does not exist
+
+        if key not in self.properties:
+            self.properties[key] = value
+
+    def modify_property(self, key: Any, value: Any):
+
+        # Ensure the property is modified only if it exists
+
+        if key in self.properties:
+            self.properties[key] = value
+
+    def delete_property(self, key: Any):
+
+        # Ensure the property is deleted only if it exists
+
+        if key in self.properties:
+            del self.properties[key]
+
+
+class WorldbuilderGraph:
+
+    # all operations should return the id of the node or relationship created or modified if successful
+    # and raise appropriate exceptions if the operation fails
+
+    def __init__(self, uri: str) -> None:
+        self.nodes = {}
+        self.relationships = {}
+        self.node_id_name_map = {}
+        self.database_manager = DatabaseManager(uri)
+        self.database_operations = DatabaseOperations(self.database_manager)
+
+    def add_node(
+        self, name: str, primary_label: str, properties: Dict[Any, Any] = None
+    ) -> str or None:
+
+        # Enforce unique node names
+
         try:
-            command_name, args_string = command_input.split(" --", 1)
-            args = shlex.split(
-                "--" + args_string
-            )  # Prepend '--' to ensure correct splitting
-        except ValueError:
-            # If splitting fails, assume the entire input is the command (no arguments)
-            command_name = command_input
-            args = []
+            if name in self.node_id_name_map:
+                raise DuplicateNodeNameError(name)
 
-        logging.info(f"DEBUG: Split command: name={command_name}, args={args}")
-        return command_name, args
+            # Create the node
+            node = Node(name, primary_label, properties)
 
-    def execute_command(self, command_input: str) -> None:
-        logging.info(f"Start executing command: {command_input}")
-        parsed_args = {}
+            # add node to the nodes dictionary and node_id_name_map
+            self.nodes[node.node_id] = node
+            self.node_id_name_map[node.name] = node.node_id
 
-        try:
-            command_name, args = self.split_command_input(command_input)
-            logging.info(f"Split command input into name: {command_name}, args: {args}")
-        except ValueError as e:
-            logging.error(f"Error parsing command: {e}")
-            print(f"Error parsing command: {e}")
-            return
+            # add node to database
 
-        if not command_name:
-            logging.error("Command name is empty after parsing.")
-            print("Invalid command. Type 'help' for available commands.")
-            return
-
-        if command_name in self.aliases:
-            command_name = self.aliases[command_name]
-
-        command = self.commands.get(command_name)
-
-        if not command:
-            logging.error(f"Unknown command: {command_name}")
-            print(
-                f"Unknown command: {command_name}. Type 'help' for available commands."
+            self.database_operations.do_add_node(
+                node.node_id, node.name, node.labels[0], node.properties
             )
-            return
 
-        if "--help" in args:
-            self.print_command_help(command)
-            return
+            return node.node_id
 
-        try:
-            parsed_args = self.parse_arguments(args)
+        except DuplicateNodeNameError as e:
 
-            if command.execute is None:
-                logging.error(
-                    f"Command execute method is None for command: {command_name}"
-                )
-            else:
-                logging.info(
-                    f"Executing command: {command_name} with arguments: {parsed_args}"
-                )
-
-            if command_name == "view_entity":
-                result = command.execute(**parsed_args)
-                self.display_entity_details(result)
-            elif command_name == "view_graph":
-                result = command.execute(**parsed_args)
-                depth = min(int(parsed_args.get("depth", 3)), 5)  # Limit max depth to 5
-                self.display_entity_graph(result, max_depth=depth)
-            else:
-                result = command.execute(**parsed_args)
-                self.display_result(result)
-
-            logging.info(f"Command execution result: {result}")
-            logging.info(f"Command executed successfully: {command_name}")
+            logger.error(f"Error: {e}")
+            print(f"Error: {e}")
+            return None
 
         except Exception as e:
-            logging.error(
-                f"Error executing command '{command_name}' with args {parsed_args}: {e}"
+            # Handle other unforeseen exceptions
+            logger.error(f"Unexpected error: {e}")
+            print(f"Unexpected error: {e}")
+            return None
+
+    def delete_node(self, identifier: str) -> str:
+
+        node_name, node_id = self.get_name_and_id(identifier)
+
+        logging.info(
+            f"Starting delete node with name {node_name} and ID {node_id} from Worldbuildergraph "
+        )
+
+        if node_id in self.nodes:
+
+            del self.nodes[node_id]
+            self.database_operations.do_delete_node(node_id)
+
+            # remove the node from the node_id_name_map
+
+            del self.node_id_name_map[node_name]
+
+            logging.info(
+                f"Node with name {node_name} and ID {node_id} deleted from Worldbuildergraph"
             )
-            print(f"Error executing command in execute_command method: {e}")
+            return identifier
 
-    def parse_arguments(self, args: List[str]) -> Dict[str, Any]:
-        parsed_args = {}
-        i = 0
-        while i < len(args):
-            if args[i].startswith("--"):
-                arg_name = args[i][2:]
-                if arg_name == "properties":
-                    properties = {}
-                    i += 1
-                    while i < len(args) and not args[i].startswith("--"):
-                        key, value = args[i].split("=")
-                        properties[key] = value
-                        i += 1
-                    parsed_args["properties"] = properties
-                elif i + 1 < len(args):
-                    arg_value = args[i + 1]
-                    parsed_args[arg_name] = arg_value
-                    i += 2
-                else:
-                    logging.error(f"No value provided for argument {args[i]}")
-                    raise ValueError(f"No value provided for argument {args[i]}")
-            else:
-                logging.error(f"Invalid argument format: {args[i]}")
-                raise ValueError(f"Invalid argument format: {args[i]}")
-        return parsed_args
+        raise NodeNotFoundError(identifier)
 
-    def run(self):
-        self.console.print(
-            "Enter your command or type 'help' for instructions or 'exit' to quit.",
-            style="bold green",
-        )
-        while True:
-            try:
-                if self.use_prompt_toolkit:
-                    command_input = self.session.prompt(
-                        HTML("<ansiyellow>Command></ansiyellow> ")
-                    ).strip()
-                else:
-                    command_input = self.fallback_input("Command> ").strip()
-
-                if command_input in ["exit"]:
-                    break
-                if command_input == "help":
-                    self.print_help()
-                    continue
-                self.execute_command(command_input)
-            except EOFError:
-                break
-        self.console.print("\nThanks for using Worldbuilder", style="bold blue")
-
-    def fallback_input(self, prompt_text):
-        return input(prompt_text)
-
-    def print_help(self) -> None:
-        self.console.print("Available commands:", style="bold green")
-        for name, command in self.commands.items():
-            alias_str = (
-                f" (aliases: {', '.join(command.aliases)})" if command.aliases else ""
-            )
-            self.console.print(f"  {name:<15} - {command.description}{alias_str}")
-        self.console.print(
-            "\nFor detailed help on a specific command, type <command_name> --help",
-            style="italic",
-        )
-
-    def print_command_help(self, command: Command) -> None:
-        print(f"Command: {command.name}")
-        print(f"Description: {command.description}")
-        print("Usage:")
-        usage = f"  {command.name}"
-        for arg_name in command.arguments:
-            usage += f" --{arg_name} <value>"
-        print(usage)
-        print("Arguments:")
-        for arg_name, arg_params in command.arguments.items():
-            print(f"  --{arg_name}: {arg_params.get('help', 'No description')}")
-        if command.aliases:
-            print(f"Aliases: {', '.join(command.aliases)}")
-        print("\nUse --help with any command to see this help message.")
-
-    def display_result(self, result: Any) -> None:
-        if result is None:
-            self.console.print(
-                "Operation completed, but no results were returned.", style="yellow"
-            )
-        elif isinstance(result, str):
-            self.console.print(result)
-        elif isinstance(result, list):
-            self.display_list_result(result)
-        else:
-            self.console.print(str(result))
-        self.console.print("")
-
-    def display_list_result(self, result_list: List[Any]) -> None:
-        if not result_list:
-            self.console.print("No results to display.", style="yellow")
-            return
-
-        headers = []
-        for item in result_list:
-            if isinstance(item, dict):
-                headers = list(item.keys())
-                break
-
-        if not headers:
-            self.console.print("Unable to determine table structure.", style="yellow")
-            return
-
-        table = Table(show_header=True, header_style="bold magenta")
-        for header in headers:
-            table.add_column(header, style="dim", max_width=50)  # Limit column width
-
-        for item in result_list:
-            if isinstance(item, dict):
-                table.add_row(*[str(item.get(header, "")) for header in headers])
-            else:
-                table.add_row(str(item), *["" for _ in range(len(headers) - 1)])
-
-        self.console.print(table)
-
-    def display_item_result(self, item: Any) -> None:
-        if isinstance(item, dict) and "dynamic_properties" in item:
-            self.display_dict_result(item)
-        else:
-            self.console.print(item)
-
-    def display_dict_result(self, item_dict: Dict[str, Any]) -> None:
-        panel = Panel(
-            f"[bold]Name:[/bold] {item_dict.get('name')}\n"
-            f"[bold]Type:[/bold] {item_dict.get('entity_type')}\n"
-            f"[bold]Description:[/bold] {item_dict.get('description')}\n",
-            title="Entity Details",
-            expand=False,
-        )
-        self.console.print(panel)
-
-        if item_dict["dynamic_properties"]:
-            prop_table = Table(show_header=True, header_style="bold blue")
-            prop_table.add_column("Property", style="dim")
-            prop_table.add_column("Value", style="dim")
-            for key, value in item_dict["dynamic_properties"].items():
-                prop_table.add_row(str(key), str(value))
-            self.console.print(prop_table)
-
-    def display_entity_details(self, entity_details: Dict[str, Any]) -> None:
-        if not entity_details:
-            self.console.print("Entity not found.", style="bold red")
-            return
-
-        panel = Panel(
-            f"[bold]Name:[/bold] {entity_details.get('name')}\n"
-            f"[bold]Type:[/bold] {entity_details.get('entity_type')}\n"
-            f"[bold]Description:[/bold] {entity_details.get('description')}\n",
-            title="Entity Details",
-            expand=False,
-        )
-        self.console.print(panel)
-
-        prop_table = Table(show_header=True, header_style="bold blue")
-        prop_table.add_column("Property", style="dim")
-        prop_table.add_column("Value", style="dim")
-        for key, value in entity_details.items():
-            if key not in ["name", "entity_type", "description", "relationships"]:
-                prop_table.add_row(str(key), str(value))
-        self.console.print(prop_table)
-
-        # New code to handle relationships
-        if "relationships" in entity_details:
-            rel_table = Table(show_header=True, header_style="bold green")
-            rel_table.add_column("Relationship Type", style="dim")
-            rel_table.add_column("Target Entity", style="dim")
-            for rel in entity_details["relationships"]:
-                rel_type = rel[0][
-                    "original_type"
-                ]  # Adjust based on your data structure
-                target_name = rel[1]["name"]  # Adjust based on your data structure
-                rel_table.add_row(rel_type, target_name)
-            self.console.print("\nRelationships:", style="bold")
-            self.console.print(rel_table)
-
-    def display_entity_graph(self, graph: Dict[str, Any], max_depth: int = 3) -> None:
-        if not graph:
-            self.console.print("Entity not found.", style="bold red")
-            return
-
-        tree = Tree(f"[bold]{graph['name']}[/bold] ({graph['type']})")
-        self._add_relationships_to_tree(
-            tree, graph.get("relationships", []), current_depth=1, max_depth=max_depth
-        )
-        self.console.print(tree)
-
-    def _add_relationships_to_tree(
+    def add_relationship(
         self,
-        tree: Tree,
-        relationships: List[Dict[str, Any]],
-        current_depth: int,
-        max_depth: int,
-    ) -> None:
-        if current_depth > max_depth:
-            return
+        start_node_identifier: str,
+        rel_type: str,
+        end_node_identifier: str,
+        properties: Dict[Any, Any] = None,
+    ) -> str:
 
-        for rel in relationships:
-            rel_description = f"[italic]{rel['type']}[/italic] → [bold]{rel['target']['name']}[/bold] ({rel['target']['type']})"
-            child = tree.add(rel_description)
-            self._add_relationships_to_tree(
-                child,
-                rel["target"].get("relationships", []),
-                current_depth + 1,
-                max_depth,
+        # Ensure the start node and end node are not the same
+        start_node_name, start_node_id = self.get_name_and_id(start_node_identifier)
+        end_node_name, end_node_id = self.get_name_and_id(end_node_identifier)
+
+        if start_node_id == end_node_id:
+            raise SameNodeError()
+
+        properties = {} if properties is None else properties
+        relationship = Relationship(
+            start_node_name, rel_type, end_node_name, properties
+        )
+
+        self.relationships[relationship.relationship_id] = relationship
+
+        logging.info(
+            f"Added relationship {rel_type} between {start_node_name} and {end_node_name}"
+        )
+
+        self.database_operations.do_add_relationship(
+            start_node_id,
+            rel_type,
+            end_node_id,
+            relationship.relationship_id,
+            properties,
+        )
+
+        return relationship.relationship_id
+
+    def delete_relationship(
+        self,
+        relationship_id: str = None,
+        start_node_identifier: str = None,
+        end_node_identifier: str = None,
+        rel_type: str = None,
+    ) -> str or None:
+
+        # Check if sufficient information is provided
+        if not (relationship_id or (start_node_identifier and end_node_identifier)):
+            raise InsufficientNodesError()
+
+        # Delete by relationship_id if provided
+        if relationship_id:
+            return self._delete_by_relationship_id(relationship_id)
+
+        # Delete by node identifiers and optional relationship type
+        return self._delete_by_nodes(
+            start_node_identifier, end_node_identifier, rel_type
+        )
+
+    def _delete_by_relationship_id(self, relationship_id: str) -> str:
+        if relationship_id in self.relationships:
+            del self.relationships[relationship_id]
+            self.database_operations.do_delete_relationship(relationship_id)
+            return relationship_id
+        raise RelationshipNotFoundError()
+
+    def _delete_by_nodes(
+        self, start_node_identifier: str, end_node_identifier: str, rel_type: str = None
+    ) -> None:
+        start_node_name, _ = self.get_name_and_id(start_node_identifier)
+        end_node_name, _ = self.get_name_and_id(end_node_identifier)
+
+        # Copy to avoid changing the dictionary while iterating
+        temp_relationships = self.relationships.copy()
+
+        deleted_any = False
+        for rel_id, rel in temp_relationships.items():
+            if self._matches_criteria(rel, start_node_name, end_node_name, rel_type):
+                del self.relationships[rel_id]
+                self.database_operations.do_delete_relationship(rel_id)
+                deleted_any = True
+
+        if not deleted_any:
+            raise RelationshipNotFoundError()
+
+    @staticmethod
+    def _matches_criteria(
+        rel, start_node_name: str, end_node_name: str, rel_type: str = None
+    ) -> bool:
+        return (
+            rel.start_node == start_node_name
+            and rel.end_node == end_node_name
+            and (rel_type is None or rel.type == rel_type)
+        )
+
+    @staticmethod
+    def is_valid_node_id(identifier: str) -> bool:
+        pattern = r"^n_[A-Za-z0-9_-]{6}$"
+        return bool(re.match(pattern, identifier))
+
+    def get_name_and_id(self, identifier):
+
+        if self.is_valid_node_id(identifier):
+            logging.info(f"Identifier {identifier} is a node ID")
+            return self.get_name_by_node_id(identifier), identifier
+        else:
+            logging.info(f"Identifier {identifier} is a node name")
+            return identifier, self.get_node_id_by_name(identifier)
+
+    def get_name_by_node_id(self, node_id: str) -> str:
+
+        if node_id in self.nodes:
+            return self.nodes[node_id].name
+
+        raise NodeIdNotFoundError(node_id)
+
+    def get_node_id_by_name(self, name: str) -> str:
+
+        if name in self.node_id_name_map:
+            return self.node_id_name_map[name]
+
+        raise NodeNotFoundError(name)
+
+
+class DatabaseManager:
+    def __init__(self, db_adress: str) -> None:
+        db_user = os.getenv("DB_USER")
+        db_password = os.getenv("DB_PASSWORD")
+        try:
+            # Establish connection with the database using URI and credentials
+            self.graph = Graph(db_adress, auth=(db_user, db_password))
+            logger.info("Successfully connected to the database.")
+        except Exception as e:
+            logger.error(f"Error connecting to the database: {e}")
+            raise
+
+
+class DatabaseOperations:
+
+    # Database operations translate the operations on the WorldbuilderGraph to the database
+    # The WorldbuilderGraph is used to keep track of the nodes and relationships in memory
+    # These operations are then translated to the database using the DatabaseManager
+    # CRUD operations are only to be called from WorldbuilderGraph methods.
+    # Other methods can be called from the main application for information gathering.
+
+    def __init__(self, database_manager: DatabaseManager):
+        self.database_manager = database_manager
+
+    def execute_query(self, query: str, **params: Any) -> List[Dict[str, Any]]:
+        try:
+            result = self.database_manager.graph.run(query, **params).data()
+            logger.info(f"Query executed successfully. Result: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Error executing query '{query}' with params {params}: {e}")
+            raise
+
+    def create_constraints(self):
+        try:
+            # Unique constraint on 'name' property for all nodes
+            query_name = "CREATE CONSTRAINT unique_name_constraint IF NOT EXISTS ON (n:Label) ASSERT n.name IS UNIQUE"
+            self.execute_query(query_name)
+            logger.info("Unique constraint on 'name' created successfully.")
+
+            # Unique constraint on 'node_id' property for all nodes
+            query_node_id = (
+                "CREATE CONSTRAINT unique_node_id_constraint "
+                "IF NOT EXISTS ON (n:Label) ASSERT n.node_id IS UNIQUE"
+            )
+            self.execute_query(query_node_id)
+            logger.info("Unique constraint on 'node_id' created successfully.")
+        except Exception as e:
+            logger.error(f"Error creating constraints: {e}")
+            raise
+
+    @staticmethod
+    def dict_to_cypher_properties(properties: dict) -> str:
+
+        # Convert dictionary to cypher properties string
+        # Remove leading and trailing whitespaces from keys
+        # Raise warning if key contains spaces
+
+        properties_string = ", ".join(
+            [f"`{k.strip()}`: $`{k.strip()}`" for k in properties.keys()]
+        )
+
+        if any(" " in key for key in properties.keys()):
+            logger.info(
+                "Property keys should not contain spaces. Try to use underscores instead."
             )
 
+        logging.info(f"Properties string: {properties_string}")
+        return properties_string
 
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        filename="app.log",
-        filemode="w",
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    # CRUD operations for nodes and relationships:
 
-    logging.getLogger("py2neo").setLevel(logging.WARNING)
+    def erase_all(self) -> None:
 
-    logging.info("---------------------------Application started")
+        # Erase all nodes and relationships from the database
+        try:
+            query = "MATCH (n) DETACH DELETE n RETURN count(n) as deleted_nodes"
+            logging.info("Erasing all nodes and relationships from the database.")
+            self.execute_query(query)
 
-    load_dotenv()
+        except Exception as e:
+            logging.error(f"Error erasing all nodes and relationships: {e}")
+            raise
 
-    db_uri = os.getenv("DB_URI")
-    db_user = os.getenv("DB_USER")
-    db_password = os.getenv("DB_PASSWORD")
+    def do_add_node(
+        self,
+        node_id: str,
+        name: str,
+        primary_label: str,
+        properties: Dict[Any, Any] = None,
+    ) -> str:
 
-    my_world = World(db_uri, db_user, db_password)
-    # exit
-    # my_world.clear_graph()
+        # generate properties string and include identifier in the properties dictionary
+        properties["node_id"] = node_id
+        props = self.dict_to_cypher_properties(properties)
 
-    data_path = "data/world_data_v3.json"
-    my_world.load_data(data_path)
-    print(my_world)
+        query = f"CREATE (n:{primary_label} {{name: $name, {props}}}) RETURN id(n) as cypher_id"
 
-    my_world.populate_graph()
-    print("Graph populated!")
+        try:
+            self.execute_query(query, name=name, **properties)
+            logger.info(
+                f"Node '{name}' with ID {node_id} added successfully to database"
+            )
+            return node_id
+        except Exception as e:
+            if "already exists" in str(e):
+                raise DuplicateNodeNameError(name)
+            logger.error(f"Error adding node to database '{name}': {e}")
+            raise
 
-    cli = CLI(my_world)
+    def do_delete_node(self, node_id: str) -> str:
 
-    cli.run()
-    logging.info("---------------------------Application ended")
+        query = "MATCH (n {node_id: $node_id}) DETACH DELETE n RETURN count(n) as deleted_nodes"
+
+        try:
+            self.execute_query(query, node_id=node_id)
+            logger.info(f"Node with ID {node_id} deleted from database successfully")
+            return node_id
+
+        except Exception as e:
+            logger.error(f"Error deleting node from database with ID {node_id}: {e}")
+            raise
+
+    def do_add_relationship(
+        self,
+        start_node_id: str,
+        rel_type: str,
+        end_node_id: str,
+        relationship_id: str,
+        properties: Dict[Any, Any] = None,
+    ) -> str:
+        # Add relationship between nodes in the database
+
+        properties = {} if properties is None else properties
+        properties["relationship_id"] = relationship_id
+        properties_string = self.dict_to_cypher_properties(properties)
+
+        query = (
+            f"MATCH (start_node {{node_id: $start_node_id}}), (end_node {{node_id: $end_node_id}}) "
+            f"CREATE (start_node)-[r:{rel_type} {{{properties_string}}}]->(end_node) "
+            "RETURN id(r) as cypher_id"
+        )
+
+        try:
+            self.execute_query(
+                query,
+                start_node_id=start_node_id,
+                end_node_id=end_node_id,
+                **properties,
+            )
+            logger.info(
+                f"Relationship of type '{rel_type}' between nodes "
+                f"with IDs {start_node_id} and {end_node_id} added successfully to database"
+            )
+            return start_node_id
+
+        except Exception as e:
+            logger.error(
+                f"Error adding relationship to database between nodes with IDs {start_node_id} and {end_node_id}: {e}"
+            )
+            raise
+
+    def do_delete_relationship(self, relationship_id: str) -> str:
+
+        # Delete relationship from the database
+
+        query = (
+            "MATCH ()-[r {relationship_id: $relationship_id}]-() "
+            "DELETE r RETURN count(r) as deleted_relationships"
+        )
+
+        try:
+            self.execute_query(query, relationship_id=relationship_id)
+            logger.info(
+                f"Relationship with ID {relationship_id} deleted from database successfully"
+            )
+            return relationship_id
+
+        except Exception as e:
+            logger.error(
+                f"Error deleting relationship from database with ID {relationship_id}: {e}"
+            )
+            raise
 
 
-if __name__ == "__main__":
-    main()
+# Usage
+load_dotenv()
+db_uri: str | None = os.getenv("DB_URI")
+
+# Create a complex Node with many properties and secondary labels with WorldbuilderGraph fantasy themed
+
+graph = WorldbuilderGraph(db_uri)
+graph.database_operations.erase_all()
+graph.add_node("Gandalf", "Wizard", {"staff": "Yes", "magic": "Yes", "age": 2019})
+graph.add_node("Elminster", "Wizard", {"staff": "Yes", "magic": "Yes", "age": 2000})
+print("---")
+graph.add_relationship("Gandalf", "FRIEND", "Elminster")
+graph.add_relationship("Gandalf", "MENTOR", "Elminster")
+graph.add_relationship("Gandalf", "STUDENT", "Elminster")
+print("---")
+graph.delete_relationship(
+    start_node_identifier="Gandalf", end_node_identifier="Elminster"
+)

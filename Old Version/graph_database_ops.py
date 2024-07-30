@@ -141,6 +141,7 @@ class GraphDatabaseOperations:
         query = f"""
         MATCH (a:Entity {{name: $source_name}}), (b:Entity {{name: $target_name}})
         CREATE (a)-[r:{sanitized_type}]->(b)
+        SET r += $properties
         SET r.original_type = "{rel_type}"
         RETURN r
         """
@@ -156,30 +157,22 @@ class GraphDatabaseOperations:
     def bulk_create_relationships(self, relationships: List[Relationship]) -> None:
         logging.info(f"Starting bulk creation of {len(relationships)} relationships.")
 
-        # Group relationships by sanitized type
-        rel_groups = {}
-        for rel in relationships:
-            sanitized_type = self.sanitize_rel_type(rel["type"])
-            rel_groups.setdefault(sanitized_type, []).append(rel)
-
         total_count = 0
-        for sanitized_type, rels in rel_groups.items():
-            query = f"""
-            UNWIND $rels AS rel
-            MATCH (a:Entity {{name: rel.source}})
-            MATCH (b:Entity {{name: rel.target}})
-            MERGE (a)-[r:{sanitized_type}]->(b)
-            SET r.original_type = rel.type
-            RETURN count(*) as count
-            """
+        for rel in relationships:
             try:
-                result = self.db_manager.execute_query(query, rels=rels)
-                count = result[0]["count"]
-                total_count += count
-                logging.info(f"Created {count} relationships of type {sanitized_type}")
+                self.create_relationship(
+                    source_name=rel["source"],
+                    rel_type=rel["type"],
+                    target_name=rel["target"],
+                    properties=rel.get("properties", {}),
+                )
+                total_count += 1
+                logging.info(
+                    f"Created relationship: {rel['type']} from {rel['source']} to {rel['target']}"
+                )
             except Exception as e:
                 logging.error(
-                    f"Error creating relationships of type {sanitized_type}: {e}"
+                    f"Error creating relationship {rel['type']} from {rel['source']} to {rel['target']}: {e}"
                 )
                 raise
 
@@ -225,7 +218,7 @@ class GraphDatabaseOperations:
         RETURN n
         """
 
-        exitg.info(
+        logging.info(
             "Querying entities with filters: "
             f"entity_type={entity_type}, name={name}, description={description}"
         )

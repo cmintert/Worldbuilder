@@ -38,8 +38,9 @@ class Entity:
         return self._properties.copy()
 
     def add_relationship(
-        self, rel_type: str, target: "Entity", **properties: Any
+        self, rel_type: str, target: Entity, **properties: Any
     ) -> "Relationship":
+
         relationship = Relationship(self, rel_type, target, **properties)
         self.relationships.append(relationship)
         return relationship
