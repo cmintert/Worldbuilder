@@ -194,63 +194,66 @@ class WorldbuilderGraph:
     def add_node(
         self, name: str, primary_label: str, properties: Dict[Any, Any] = None
     ) -> str or None:
-
-        # Enforce unique node names
-
         try:
-            if name in self.node_id_name_map:
-                raise DuplicateNodeNameError(name)
-
-            # Create the node
-            node = Node(name, primary_label, properties)
-
-            # add node to the nodes dictionary and node_id_name_map
-            self.nodes[node.node_id] = node
-            self.node_id_name_map[node.name] = node.node_id
-
-            # add node to database
-
-            self.database_operations.do_add_node(
-                node.node_id, node.name, node.labels[0], node.properties
-            )
-
+            self._check_duplicate_node(name)
+            node = self._create_node(name, primary_label, properties)
+            self._add_node_to_memory(node)
+            self._add_node_to_database(node)
             return node.node_id
-
         except DuplicateNodeNameError as e:
-
             logger.error(f"Error: {e}")
             print(f"Error: {e}")
             return None
-
         except Exception as e:
-            # Handle other unforeseen exceptions
             logger.error(f"Unexpected error: {e}")
             print(f"Unexpected error: {e}")
             return None
 
-    def delete_node(self, identifier: str) -> str:
+    def _check_duplicate_node(self, name: str) -> None:
+        if name in self.node_id_name_map:
+            raise DuplicateNodeNameError(name)
 
-        node_name, node_id = self.get_name_and_id(identifier)
+    def _create_node(
+        self, name: str, primary_label: str, properties: Dict[Any, Any] = None
+    ) -> Node:
+        return Node(name, primary_label, properties)
 
-        logging.info(
-            f"Starting delete node with name {node_name} and ID {node_id} from Worldbuildergraph "
+    def _add_node_to_memory(self, node: Node) -> None:
+        self.nodes[node.node_id] = node
+        self.node_id_name_map[node.name] = node.node_id
+
+    def _add_node_to_database(self, node: Node) -> None:
+        self.database_operations.do_add_node(
+            node.node_id, node.name, node.labels[0], node.properties
         )
 
+    def delete_node(self, identifier: str) -> str:
+        node_name, node_id = self.get_name_and_id(identifier)
+        self._log_deletion_start(node_name, node_id)
+        self._delete_node_from_memory(node_name, node_id)
+        self._delete_node_from_database(node_id)
+        self._log_deletion_success(node_name, node_id)
+        return identifier
+
+    def _log_deletion_start(self, node_name: str, node_id: str) -> None:
+        logging.info(
+            f"Starting delete node with name {node_name} and ID {node_id} from Worldbuildergraph"
+        )
+
+    def _delete_node_from_memory(self, node_name: str, node_id: str) -> None:
         if node_id in self.nodes:
-
             del self.nodes[node_id]
-            self.database_operations.do_delete_node(node_id)
-
-            # remove the node from the node_id_name_map
-
             del self.node_id_name_map[node_name]
+        else:
+            raise NodeNotFoundError(node_name)
 
-            logging.info(
-                f"Node with name {node_name} and ID {node_id} deleted from Worldbuildergraph"
-            )
-            return identifier
+    def _delete_node_from_database(self, node_id: str) -> None:
+        self.database_operations.do_delete_node(node_id)
 
-        raise NodeNotFoundError(identifier)
+    def _log_deletion_success(self, node_name: str, node_id: str) -> None:
+        logging.info(
+            f"Node with name {node_name} and ID {node_id} deleted from Worldbuildergraph"
+        )
 
     def add_relationship(
         self,
@@ -260,33 +263,55 @@ class WorldbuilderGraph:
         properties: Dict[Any, Any] = None,
     ) -> str:
 
-        # Ensure the start node and end node are not the same
         start_node_name, start_node_id = self.get_name_and_id(start_node_identifier)
         end_node_name, end_node_id = self.get_name_and_id(end_node_identifier)
 
-        if start_node_id == end_node_id:
-            raise SameNodeError()
+        self._validate_nodes(start_node_id, end_node_id)
 
-        properties = {} if properties is None else properties
-        relationship = Relationship(
+        relationship = self._create_relationship(
             start_node_name, rel_type, end_node_name, properties
         )
 
-        self.relationships[relationship.relationship_id] = relationship
-
-        logging.info(
-            f"Added relationship {rel_type} between {start_node_name} and {end_node_name}"
+        self._add_relationship_to_memory(relationship)
+        self._add_relationship_to_database(
+            start_node_id, rel_type, end_node_id, relationship
         )
 
+        return relationship.relationship_id
+
+    def _validate_nodes(self, start_node_id: str, end_node_id: str) -> None:
+        if start_node_id == end_node_id:
+            raise SameNodeError()
+
+    def _create_relationship(
+        self,
+        start_node_name: str,
+        rel_type: str,
+        end_node_name: str,
+        properties: Dict[Any, Any] = None,
+    ) -> Relationship:
+        return Relationship(start_node_name, rel_type, end_node_name, properties)
+
+    def _add_relationship_to_memory(self, relationship: Relationship) -> None:
+        self.relationships[relationship.relationship_id] = relationship
+        logging.info(
+            f"Added relationship {relationship.type} between {relationship.start_node} and {relationship.end_node}"
+        )
+
+    def _add_relationship_to_database(
+        self,
+        start_node_id: str,
+        rel_type: str,
+        end_node_id: str,
+        relationship: Relationship,
+    ) -> None:
         self.database_operations.do_add_relationship(
             start_node_id,
             rel_type,
             end_node_id,
             relationship.relationship_id,
-            properties,
+            relationship.properties,
         )
-
-        return relationship.relationship_id
 
     def delete_relationship(
         self,
